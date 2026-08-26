@@ -3,6 +3,7 @@ import time
 import pandas as pd
 from pybit.unified_trading import HTTP
 
+# Railway Variables арқылы алынатын API кілттер
 API_KEY = os.getenv("BYBIT_API_KEY")
 API_SECRET = os.getenv("BYBIT_API_SECRET")
 
@@ -13,8 +14,9 @@ GRID_COUNT = 8
 GRID_SPACING_PCT = 0.01   
 QTY_PER_GRID = 250        
 
+# testnet=True -> Демо аккаунтпен жұмыс жасау режимі
 session = HTTP(
-    testnet=False,
+    testnet=True,
     api_key=API_KEY,
     api_secret=API_SECRET,
 )
@@ -94,8 +96,8 @@ def run_bot():
             price, rsi = get_market_data()
             print(f"[LIVE] XRP/USDT: ${price} | RSI: {round(rsi, 2)}")
 
-            if 35 <= rsi <= 65:
-                if time.time() - last_update > 1200:
+            if 30 <= rsi <= 70:
+                if time.time() - last_update > 600:
                     place_grid(price)
                     last_update = time.time()
             else:
