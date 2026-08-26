@@ -3,7 +3,6 @@ import time
 import pandas as pd
 from pybit.unified_trading import HTTP
 
-# Railway Variables арқылы алынатын API кілттер
 API_KEY = os.getenv("BYBIT_API_KEY")
 API_SECRET = os.getenv("BYBIT_API_SECRET")
 
@@ -14,7 +13,6 @@ GRID_COUNT = 8
 GRID_SPACING_PCT = 0.01   
 QTY_PER_GRID = 250        
 
-# Bybit Demo Trading аккаунты үшін demo=True қойылады
 session = HTTP(
     demo=True,
     api_key=API_KEY,
@@ -58,6 +56,7 @@ def place_grid(current_price):
     print(f"🚀 Жаңа XRP Сеткасы құрылуда | Ағымдағы баға: ${current_price}")
     half_grid = GRID_COUNT // 2
 
+    # Buy ордерлері үшін positionIdx=1 (Hedge mode Long)
     for i in range(1, half_grid + 1):
         buy_price = round(current_price * (1 - (GRID_SPACING_PCT * i)), 4)
         try:
@@ -68,13 +67,14 @@ def place_grid(current_price):
                 orderType="Limit",
                 price=str(buy_price),
                 qty=str(QTY_PER_GRID),
-                positionIdx=0,
+                positionIdx=1,
                 postOnly=True
             )
             print(f"   🟢 [BUY LIMIT] -> ${buy_price} | Жауап: {res['retMsg']}")
         except Exception as e:
             print(f" Buy қатесі: {e}")
 
+    # Sell ордерлері үшін positionIdx=2 (Hedge mode Short)
     for i in range(1, half_grid + 1):
         sell_price = round(current_price * (1 + (GRID_SPACING_PCT * i)), 4)
         try:
@@ -85,7 +85,7 @@ def place_grid(current_price):
                 orderType="Limit",
                 price=str(sell_price),
                 qty=str(QTY_PER_GRID),
-                positionIdx=0,
+                positionIdx=2,
                 postOnly=True
             )
             print(f"   🔴 [SELL LIMIT] -> ${sell_price} | Жауап: {res['retMsg']}")
