@@ -14,9 +14,9 @@ GRID_COUNT = 8
 GRID_SPACING_PCT = 0.01   
 QTY_PER_GRID = 250        
 
-# Bybit Unified Demo / Mainnet үшін testnet=False қойылады
+# Bybit Demo Trading үшін demo=True қойылады
 session = HTTP(
-    testnet=False,
+    demo=True,
     api_key=API_KEY,
     api_secret=API_SECRET,
 )
@@ -29,7 +29,7 @@ def setup_market():
             buyLeverage=str(LEVERAGE),
             sellLeverage=str(LEVERAGE),
         )
-        print(f"✅ {SYMBOL} үшін иық {LEVERAGE}x болып белгіленді.")
+        print(f"✅ {SYMBOL} үшін иық {LEVERAGE}x болып орнатылды.")
     except Exception as e:
         print(f"ℹ️ Иық баптауы ескертуі: {e}")
 
@@ -55,7 +55,7 @@ def clear_orders():
 
 def place_grid(current_price):
     clear_orders()
-    print(f"🚀 Жаңа XRP Сеткасы құрылуда | Баға: ${current_price}")
+    print(f"🚀 Жаңа XRP Сеткасы құрылуда | Ағымдағы баға: ${current_price}")
     half_grid = GRID_COUNT // 2
 
     for i in range(1, half_grid + 1):
@@ -70,7 +70,7 @@ def place_grid(current_price):
                 qty=str(QTY_PER_GRID),
                 postOnly=True
             )
-            print(f"   🟢 [BUY LIMIT] -> ${buy_price} | Рез: {res['retMsg']}")
+            print(f"   🟢 [BUY LIMIT] -> ${buy_price} | Жауап: {res['retMsg']}")
         except Exception as e:
             print(f" Buy қатесі: {e}")
 
@@ -86,7 +86,7 @@ def place_grid(current_price):
                 qty=str(QTY_PER_GRID),
                 postOnly=True
             )
-            print(f"   🔴 [SELL LIMIT] -> ${sell_price} | Рез: {res['retMsg']}")
+            print(f"   🔴 [SELL LIMIT] -> ${sell_price} | Жауап: {res['retMsg']}")
         except Exception as e:
             print(f" Sell қатесі: {e}")
 
@@ -97,14 +97,14 @@ def run_bot():
     while True:
         try:
             price, rsi = get_market_data()
-            print(f"[LIVE] XRP/USDT: ${price} | RSI: {round(rsi, 2)}")
+            print(f"[LIVE DEMO] XRP/USDT: ${price} | RSI: {round(rsi, 2)}")
 
             if 30 <= rsi <= 70:
                 if time.time() - last_update > 600:
                     place_grid(price)
                     last_update = time.time()
             else:
-                print(f"⚠️ RSI деңгейі шеткі шекте ({round(rsi, 2)}). Қауіпсіздік үшін ордер қойылмайды.")
+                print(f"⚠️ RSI шектен тыс деңгейде ({round(rsi, 2)}). Ордер қойылмайды.")
 
             time.sleep(15)
         except Exception as e:
