@@ -14,7 +14,7 @@ GRID_COUNT = 8
 GRID_SPACING_PCT = 0.01   
 QTY_PER_GRID = 250        
 
-# Bybit Demo Trading үшін demo=True қойылады
+# Bybit Demo Trading аккаунты үшін demo=True қойылады
 session = HTTP(
     demo=True,
     api_key=API_KEY,
@@ -68,6 +68,7 @@ def place_grid(current_price):
                 orderType="Limit",
                 price=str(buy_price),
                 qty=str(QTY_PER_GRID),
+                positionIdx=0,
                 postOnly=True
             )
             print(f"   🟢 [BUY LIMIT] -> ${buy_price} | Жауап: {res['retMsg']}")
@@ -84,6 +85,7 @@ def place_grid(current_price):
                 orderType="Limit",
                 price=str(sell_price),
                 qty=str(QTY_PER_GRID),
+                positionIdx=0,
                 postOnly=True
             )
             print(f"   🔴 [SELL LIMIT] -> ${sell_price} | Жауап: {res['retMsg']}")
