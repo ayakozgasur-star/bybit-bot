@@ -14,9 +14,9 @@ GRID_COUNT = 8
 GRID_SPACING_PCT = 0.01   
 QTY_PER_GRID = 250        
 
-# testnet=True -> Демо аккаунтпен жұмыс жасау режимі
+# Bybit Unified Demo / Mainnet үшін testnet=False қойылады
 session = HTTP(
-    testnet=True,
+    testnet=False,
     api_key=API_KEY,
     api_secret=API_SECRET,
 )
@@ -31,7 +31,7 @@ def setup_market():
         )
         print(f"✅ {SYMBOL} үшін иық {LEVERAGE}x болып белгіленді.")
     except Exception as e:
-        print(f"ℹ️ Иық баптауы: {e}")
+        print(f"ℹ️ Иық баптауы ескертуі: {e}")
 
 def get_market_data():
     response = session.get_kline(category=CATEGORY, symbol=SYMBOL, interval="15", limit=50)
@@ -48,7 +48,10 @@ def get_market_data():
     return df['close'].iloc[-1], df['rsi'].iloc[-1]
 
 def clear_orders():
-    session.cancel_all_orders(category=CATEGORY, symbol=SYMBOL)
+    try:
+        session.cancel_all_orders(category=CATEGORY, symbol=SYMBOL)
+    except Exception as e:
+        print(f"Ордерлерді өшіру қатесі: {e}")
 
 def place_grid(current_price):
     clear_orders()
@@ -58,7 +61,7 @@ def place_grid(current_price):
     for i in range(1, half_grid + 1):
         buy_price = round(current_price * (1 - (GRID_SPACING_PCT * i)), 4)
         try:
-            session.place_order(
+            res = session.place_order(
                 category=CATEGORY,
                 symbol=SYMBOL,
                 side="Buy",
@@ -67,14 +70,14 @@ def place_grid(current_price):
                 qty=str(QTY_PER_GRID),
                 postOnly=True
             )
-            print(f"   🟢 [BUY LIMIT] -> ${buy_price}")
+            print(f"   🟢 [BUY LIMIT] -> ${buy_price} | Рез: {res['retMsg']}")
         except Exception as e:
-            print(f"Buy қатесі: {e}")
+            print(f" Buy қатесі: {e}")
 
     for i in range(1, half_grid + 1):
         sell_price = round(current_price * (1 + (GRID_SPACING_PCT * i)), 4)
         try:
-            session.place_order(
+            res = session.place_order(
                 category=CATEGORY,
                 symbol=SYMBOL,
                 side="Sell",
@@ -83,9 +86,9 @@ def place_grid(current_price):
                 qty=str(QTY_PER_GRID),
                 postOnly=True
             )
-            print(f"   🔴 [SELL LIMIT] -> ${sell_price}")
+            print(f"   🔴 [SELL LIMIT] -> ${sell_price} | Рез: {res['retMsg']}")
         except Exception as e:
-            print(f"Sell қатесі: {e}")
+            print(f" Sell қатесі: {e}")
 
 def run_bot():
     setup_market()
