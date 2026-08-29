@@ -1,14 +1,15 @@
 import hashlib
 import hmac
 import json
+import os
 import time
 import numpy as np
 import pandas as pd
 import requests
 
 # --- БОТ ҚОСЫМШАСЫНЫҢ ПАРАМЕТРЛЕРІ ---
-API_KEY = "СІЗДІҢ_API_КІЛТІҢІЗ"
-API_SECRET = "СІЗДІҢ_API_ҚҰПИЯҢЫЗ"
+API_KEY = os.getenv("API_KEY")
+API_SECRET = os.getenv("API_SECRET")
 SYMBOL = "XRPUSDT"
 LEVERAGE = 3
 QTY_PER_GRID = 250
@@ -111,9 +112,7 @@ def trading_bot_loop():
           if current_price > current_ema:
             print("Сигнал: Лонг шарттары орындалуда. Ордер ашылуда...")
             place_order("Buy", QTY_PER_GRID)
-            time.sleep(
-                300
-            )  # Ордер ашылғаннан кейін қайталап мазаламау үшін 5 минут күту
+            time.sleep(300)
           elif current_price < current_ema:
             print("Сигнал: Шорт шарттары орындалуда. Ордер ашылуда...")
             place_order("Sell", QTY_PER_GRID)
