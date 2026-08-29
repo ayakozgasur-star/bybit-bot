@@ -15,8 +15,8 @@ LEVERAGE = 3
 QTY_PER_GRID = 250
 ROI_TARGET = 0.02  # 2% ROI мақсаты
 
-# Bybit Main / Demo Trading Endpoint
-BASE_URL = "https://api.bybit.com"
+# Bybit Demo Trading Endpoint
+BASE_URL = "https://api-demo.bybit.com"
 
 
 def get_market_data(symbol):
@@ -129,3 +129,4 @@ def trading_bot_loop():
 
 if __name__ == "__main__":
   trading_bot_loop()
+
