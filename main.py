@@ -19,6 +19,21 @@ ROI_TARGET = 0.02  # 2% ROI мақсаты
 BASE_URL = "https://api-demo.bybit.com"
 
 
+def validate_credentials():
+  """Validate that required environment variables are set."""
+  missing_vars = []
+  if not API_KEY:
+    missing_vars.append("BYBIT_API_KEY")
+  if not API_SECRET:
+    missing_vars.append("BYBIT_API_SECRET")
+  
+  if missing_vars:
+    error_msg = f"Missing environment variables: {', '.join(missing_vars)}"
+    print(f"❌ {error_msg}")
+    return False
+  return True
+
+
 def get_market_data(symbol):
   url = f"{BASE_URL}/v5/market/kline"
   params = {"category": "linear", "symbol": symbol, "interval": "15", "limit": 50}
@@ -53,6 +68,17 @@ def calculate_indicators(df):
 
 
 def place_order(side, qty):
+  """Place an order on Bybit with proper credential validation."""
+  # Validate credentials before attempting to place order
+  if not API_KEY or not API_SECRET:
+    error_msg = "Cannot place order: Missing Bybit credentials"
+    if not API_KEY:
+      error_msg += " (BYBIT_API_KEY not set)"
+    if not API_SECRET:
+      error_msg += " (BYBIT_API_SECRET not set)"
+    print(f"❌ {error_msg}")
+    return
+
   path = "/v5/order/create"
   url = BASE_URL + path
   timestamp = str(int(time.time() * 1000))
@@ -69,26 +95,35 @@ def place_order(side, qty):
   body_str = json.dumps(payload)
 
   # Bybit V5 қауіпсіздік қолтаңбасы (Signature)
-  signature_payload = timestamp + API_KEY + recv_window + body_str
-  signature = hmac.new(
-      API_SECRET.encode("utf-8"),
-      signature_payload.encode("utf-8"),
-      hashlib.sha256,
-  ).hexdigest()
+  # Ensure all values are strings before concatenation
+  try:
+    signature_payload = str(timestamp) + str(API_KEY) + str(recv_window) + str(body_str)
+    signature = hmac.new(
+        str(API_SECRET).encode("utf-8"),
+        signature_payload.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
 
-  headers = {
-      "X-BAPI-API-KEY": API_KEY,
-      "X-BAPI-SIGN": signature,
-      "X-BAPI-TIMESTAMP": timestamp,
-      "X-BAPI-RECV-WINDOW": recv_window,
-      "Content-Type": "application/json; charset=utf-8",
-  }
+    headers = {
+        "X-BAPI-API-KEY": str(API_KEY),
+        "X-BAPI-SIGN": signature,
+        "X-BAPI-TIMESTAMP": timestamp,
+        "X-BAPI-RECV-WINDOW": recv_window,
+        "Content-Type": "application/json; charset=utf-8",
+    }
 
-  response = requests.post(url, data=body_str, headers=headers)
-  print("Биржа жауабы (Order Response):", response.json())
+    response = requests.post(url, data=body_str, headers=headers)
+    print("Биржа жауабы (Order Response):", response.json())
+  except Exception as e:
+    print(f"❌ Error creating order signature: {e}")
 
 
 def trading_bot_loop():
+  # Validate credentials at startup
+  if not validate_credentials():
+    print("⚠️ Bot cannot start without valid Bybit credentials. Exiting.")
+    return
+
   print(
       f"Бот іске қосылды! Символ: {SYMBOL}, ROI мақсаты: {ROI_TARGET*100}%, Иық:"
       f" {LEVERAGE}x"
