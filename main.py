@@ -1,17 +1,18 @@
-import time
-import hmac
 import hashlib
-import requests
+import hmac
+import json
+import time
 import numpy as np
 import pandas as pd
+import requests
 
 # --- БОТ ҚОСЫМШАСЫНЫҢ ПАРАМЕТРЛЕРІ ---
-API_KEY = "YOUR_API_KEY"
-API_SECRET = "YOUR_API_SECRET"
+API_KEY = "СІЗДІҢ_API_КІЛТІҢІЗ"
+API_SECRET = "СІЗДІҢ_API_ҚҰПИЯҢЫЗ"
 SYMBOL = "XRPUSDT"
 LEVERAGE = 3
 QTY_PER_GRID = 250
-ROI_TARGET = 0.02  # Жаңартылған 2% ROI мақсаты
+ROI_TARGET = 0.02  # 2% ROI мақсаты
 
 # Bybit Demo / Testnet Endpoint
 BASE_URL = "https://api-testnet.bybit.com"
@@ -41,16 +42,49 @@ def get_market_data(symbol):
 
 
 def calculate_indicators(df):
-  # EMA 20 есептеу
   df["EMA20"] = df["close"].ewm(span=20, adjust=False).mean()
-
-  # RSI 14 есептеу
   delta = df["close"].diff()
   gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
   loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
   rs = gain / loss
   df["RSI"] = 100 - (100 / (1 + rs))
   return df
+
+
+def place_order(side, qty):
+  path = "/v5/order/create"
+  url = BASE_URL + path
+  timestamp = str(int(time.time() * 1000))
+  recv_window = "5000"
+
+  payload = {
+      "category": "linear",
+      "symbol": SYMBOL,
+      "side": side,  # "Buy" (Лонг) немесе "Sell" (Шорт)
+      "orderType": "Market",
+      "qty": str(qty),
+      "timeInForce": "GoodTillCancel",
+  }
+  body_str = json.dumps(payload)
+
+  # Bybit V5 қауіпсіздік қолтаңбасы (Signature)
+  signature_payload = timestamp + API_KEY + recv_window + body_str
+  signature = hmac.new(
+      API_SECRET.encode("utf-8"),
+      signature_payload.encode("utf-8"),
+      hashlib.sha256,
+  ).hexdigest()
+
+  headers = {
+      "X-BAPI-API-KEY": API_KEY,
+      "X-BAPI-SIGN": signature,
+      "X-BAPI-TIMESTAMP": timestamp,
+      "X-BAPI-RECV-WINDOW": recv_window,
+      "Content-Type": "application/json; charset=utf-8",
+  }
+
+  response = requests.post(url, data=body_str, headers=headers)
+  print("Биржа жауабы (Order Response):", response.json())
 
 
 def trading_bot_loop():
@@ -73,14 +107,17 @@ def trading_bot_loop():
             f" ${current_ema:.4f} | RSI: {current_rsi:.2f}"
         )
 
-        # Қауіпсіздік фильтрі: RSI шектен тыс аймақта болмауын тексеру (30 мен 70 аралығы)
         if 30 <= current_rsi <= 70:
           if current_price > current_ema:
-            print("Сигнал: Лонг шарттары орындалуда...")
-            # Лонг ордерін ашу логикасы
+            print("Сигнал: Лонг шарттары орындалуда. Ордер ашылуда...")
+            place_order("Buy", QTY_PER_GRID)
+            time.sleep(
+                300
+            )  # Ордер ашылғаннан кейін қайталап мазаламау үшін 5 минут күту
           elif current_price < current_ema:
-            print("Сигнал: Шорт шарттары орындалуда...")
-            # Шорт ордерін ашу логикасы
+            print("Сигнал: Шорт шарттары орындалуда. Ордер ашылуда...")
+            place_order("Sell", QTY_PER_GRID)
+            time.sleep(300)
         else:
           print(f"⚠️ RSI шектен тыс деңгейде ({current_rsi:.2f}). Күту режимі.")
 
