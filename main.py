@@ -1,17 +1,18 @@
 import os
 import time
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
 import pandas as pd
 from pybit.unified_trading import HTTP
 
 API_KEY = os.getenv("BYBIT_API_KEY")
 API_SECRET = os.getenv("BYBIT_API_SECRET")
+
 SYMBOL = "XRPUSDT"
 CATEGORY = "linear"
-LEVERAGE = 3
-QTY_PER_GRID = 25
-ROI_TARGET = 0.02
+LEVERAGE = 3              
+GRID_COUNT = 8            
+GRID_SPACING_PCT = 0.01   
+QTY_PER_GRID = 250        
+TARGET_ROI_PCT = 2.0      # Тейк профит мақсаты 2 пайызға өзгертілді
 
 session = HTTP(
     demo=True,
@@ -19,146 +20,131 @@ session = HTTP(
     api_secret=API_SECRET,
 )
 
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"Bot is running successfully!")
-
-def run_server():
-    server = HTTPServer(("0.0.0.0", 8080), HealthCheckHandler)
-    server.serve_forever()
-
-threading.Thread(target=run_server, daemon=True).start()
-
-def get_market_data(symbol):
+def setup_market():
     try:
-        response = session.get_kline(
+        session.set_leverage(
             category=CATEGORY,
-            symbol=symbol,
-            interval="15",
-            limit=50
+            symbol=SYMBOL,
+            buyLeverage=str(LEVERAGE),
+            sellLeverage=str(LEVERAGE),
         )
-        list_data = response.get("result", {}).get("list", [])
-        if list_data:
-            df = pd.DataFrame(
-                list_data,
-                columns=[
-                    "start_time",
-                    "open",
-                    "high",
-                    "low",
-                    "close",
-                    "volume",
-                    "turnover",
-                ],
-            )
-            df["close"] = df["close"].astype(float)
-            return df[::-1].reset_index(drop=True)
+        print(f"✅ {SYMBOL} үшін иық {LEVERAGE}x болып орнатылды.")
     except Exception as e:
-        print(f"Маркет деректерін алу қатесі: {e}")
-    return None
+        print(f"ℹ️ Иық баптауы ескертуі: {e}")
 
-def calculate_indicators(df):
-    df["EMA20"] = df["close"].ewm(span=20, adjust=False).mean()
-    delta = df["close"].diff()
+def get_market_data():
+    response = session.get_kline(category=CATEGORY, symbol=SYMBOL, interval="15", limit=50)
+    data = response['result']['list']
+    df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
+    df['close'] = df['close'].astype(float)
+    
+    delta = df['close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
-    df["RSI"] = 100 - (100 / (1 + rs))
-    return df
+    df['rsi'] = 100 - (100 / (1 + rs))
+    
+    return df['close'].iloc[-1], df['rsi'].iloc[-1]
 
-def get_open_position_size(position_idx):
+def clear_orders():
     try:
-        response = session.get_positions(
-            category=CATEGORY,
-            symbol=SYMBOL
-        )
-        list_pos = response.get("result", {}).get("list", [])
-        for pos in list_pos:
-            if int(pos.get("positionIdx", 0)) == position_idx:
-                size = float(pos.get("size", 0))
-                if size > 0:
+        session.cancel_all_orders(category=CATEGORY, symbol=SYMBOL)
+    except Exception as e:
+        print(f"Ордерлерді өшіру қатесі: {e}")
+
+def check_and_take_profit():
+    """Пара пайдасы көрсетілген пайызға (2%) жетсе, позицияны жауып, пайданы бекітеді"""
+    try:
+        res = session.get_positions(category=CATEGORY, symbol=SYMBOL)
+        positions = res['result']['list']
+        for pos in positions:
+            if pos['side'] == "Buy" and float(pos['size']) > 0:
+                avg_price = float(pos['avgPrice'])
+                mark_price = float(pos['markPrice'])
+                leverage = float(pos['leverage'])
+                
+                current_roi = ((mark_price - avg_price) / avg_price) * leverage * 100
+                print(f"📊 Ағымдағы ROI: {round(current_roi, 2)}% (Максат: {TARGET_ROI_PCT}%)")
+
+                if current_roi >= TARGET_ROI_PCT:
+                    print(f"🎯 Пайда мақсаты орындалды! Позиция жабылуда...")
+                    clear_orders()
+                    session.place_order(
+                        category=CATEGORY,
+                        symbol=SYMBOL,
+                        side="Sell",
+                        orderType="Market",
+                        qty=pos['size'],
+                        reduceOnly=True,
+                        positionIdx=1
+                    )
+                    print("✅ Пайда сәтті бекітілді! Бот 1 минут тынығады.")
+                    time.sleep(60)
                     return True
     except Exception as e:
-        print(f"Позицияны тексеру қатесі: {e}")
+        print(f"Take Profit қатесі: {e}")
     return False
 
-def trading_bot_loop():
-    print(f"Бот іске қосылды! Символ: {SYMBOL}, Иық: {LEVERAGE}x")
+def place_grid(current_price):
+    clear_orders()
+    print(f"🚀 Жаңа XRP Сеткасы құрылуда | Ағымдағы баға: ${current_price}")
+    half_grid = GRID_COUNT // 2
+
+    for i in range(1, half_grid + 1):
+        buy_price = round(current_price * (1 - (GRID_SPACING_PCT * i)), 4)
+        try:
+            session.place_order(
+                category=CATEGORY,
+                symbol=SYMBOL,
+                side="Buy",
+                orderType="Limit",
+                price=str(buy_price),
+                qty=str(QTY_PER_GRID),
+                positionIdx=1,
+                postOnly=True
+            )
+        except Exception as e:
+            print(f"Buy қатесі: {e}")
+
+    for i in range(1, half_grid + 1):
+        sell_price = round(current_price * (1 + (GRID_SPACING_PCT * i)), 4)
+        try:
+            session.place_order(
+                category=CATEGORY,
+                symbol=SYMBOL,
+                side="Sell",
+                orderType="Limit",
+                price=str(sell_price),
+                qty=str(QTY_PER_GRID),
+                positionIdx=2,
+                postOnly=True
+            )
+        except Exception as e:
+            print(f"Sell қатесі: {e}")
+
+def run_bot():
+    setup_market()
+    last_update = 0
 
     while True:
         try:
-            df = get_market_data(SYMBOL)
-            if df is not None and not df.empty:
-                df = calculate_indicators(df)
-                current_rsi = df["RSI"].iloc[-1]
-                current_price = df["close"].iloc[-1]
-                current_ema = df["EMA20"].iloc[-1]
+            if check_and_take_profit():
+                last_update = 0 
 
-                print(
-                    f"[DEMO] {SYMBOL}: Баға: ${current_price:.4f} | EMA20:"
-                    f" ${current_ema:.4f} | RSI: {current_rsi:.2f}"
-                )
+            price, rsi = get_market_data()
+            print(f"[LIVE DEMO] XRP/USDT: ${price} | RSI: {round(rsi, 2)}")
 
-                if 30 <= current_rsi <= 70:
-                    if current_price > current_ema:
-                        if get_open_position_size(1):
-                            print("ℹ️ Лонг позициясы қазірдің өзінде ашық. Күту режимі.")
-                        else:
-                            print("Сигнал: Лонг шарттары орындалуда. Жаңа ордер ашылуда...")
-                            try:
-                                session.set_leverage(
-                                    category=CATEGORY,
-                                    symbol=SYMBOL,
-                                    buyLeverage=str(LEVERAGE),
-                                    sellLeverage=str(LEVERAGE)
-                                )
-                            except Exception:
-                                pass
-                                
-                            session.place_order(
-                                category=CATEGORY,
-                                symbol=SYMBOL,
-                                side="Buy",
-                                orderType="Market",
-                                qty=str(QTY_PER_GRID),
-                                timeInForce="GTC",
-                                positionIdx=1
-                            )
-                    elif current_price < current_ema:
-                        if get_open_position_size(2):
-                            print("ℹ️ Шорт позициясы қазірдің өзінде ашық. Күту режимі.")
-                        else:
-                            print("Сигнал: Шорт шарттары орындалуда. Жаңа ордер ашылуда...")
-                            try:
-                                session.set_leverage(
-                                    category=CATEGORY,
-                                    symbol=SYMBOL,
-                                    buyLeverage=str(LEVERAGE),
-                                    sellLeverage=str(LEVERAGE)
-                                )
-                            except Exception:
-                                pass
-                                
-                            session.place_order(
-                                category=CATEGORY,
-                                symbol=SYMBOL,
-                                side="Sell",
-                                orderType="Market",
-                                qty=str(QTY_PER_GRID),
-                                timeInForce="GTC",
-                                positionIdx=2
-                            )
-                else:
-                    print(f"⚠️ RSI шектен тыс деңгейде ({current_rsi:.2f}). Күту режимі.")
+            if 30 <= rsi <= 70:
+                if time.time() - last_update > 600:
+                    place_grid(price)
+                    last_update = time.time()
+            else:
+                print(f"⚠️ RSI шектен тыс деңгейде ({round(rsi, 2)}).")
 
-            time.sleep(60)
-
+            time.sleep(15)
         except Exception as e:
-            print(f"Қате орын алды: {e}")
+            print(f"Қате: {e}")
             time.sleep(10)
 
 if __name__ == "__main__":
-    trading_bot_loop()
+    run_bot()
