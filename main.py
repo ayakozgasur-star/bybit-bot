@@ -14,6 +14,7 @@ LEVERAGE = 3
 QTY_PER_GRID = 25
 
 session = HTTP(
+    demo=True,
     api_key=API_KEY,
     api_secret=API_SECRET,
 )
