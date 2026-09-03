@@ -12,7 +12,6 @@ SYMBOL = "XRPUSDT"
 CATEGORY = "linear"
 LEVERAGE = 3
 QTY_PER_GRID = 25
-TARGET_ROT_PCT = 2
 
 session = HTTP(
     testnet=False,
@@ -54,7 +53,6 @@ def analyze_and_trade(closes):
     df['macd'] = exp1 - exp2
     df['signal'] = df['macd'].ewm(span=9, adjust=False).mean()
 
-    # Соңғы көрсеткіштер
     rsi = df['rsi'].iloc[-1]
     upper = df['upper'].iloc[-1]
     lower = df['lower'].iloc[-1]
@@ -62,12 +60,12 @@ def analyze_and_trade(closes):
     signal = df['signal'].iloc[-1]
     price = df['close'].iloc[-1]
 
-    print(f"[{SYMBOL}] Баға: {price} | RSI: {rsi:.2f} | MACD: {macd:.4f} | BB Lower: {lower:.4f}")
+    print(f"[{SYMBOL}] Баға: {price} | RSI: {rsi:.2f} | MACD: {macd:.4f}")
 
     try:
-        # LONG логикасы (Конфлюенция: RSI төмен, баға төменгі Bollinger шекарасында, MACD сигнал сызығынан жоғары)
-        if rsi < 35 and price <= lower and macd > signal:
-            print(">>> LONG сигналы анықталды! Ордер ашылуда...")
+        # Жұмсартылған LONG логикасы (RSI < 45 болса жеткілікті)
+        if rsi < 45:
+            print(">>> Жұмсартылған LONG сигналы! Ордер ашылуда...")
             session.set_leverage(category=CATEGORY, symbol=SYMBOL, buyLeverage=str(LEVERAGE), sellLeverage=str(LEVERAGE))
             session.place_order(
                 category=CATEGORY,
@@ -79,12 +77,13 @@ def analyze_and_trade(closes):
             )
             print("LONG ордері сәтті орналастырылды!")
 
-        # SHORT логикасы (Конфлюенция: RSI жоғары, баға жоғарғы Bollinger шекарасында, MACD сигнал сызығынан төмен)
-        elif rsi > 65 and price >= upper and macd < signal:
-            print(">>> SHORT сигналы анықталды! Ордер ашылуда...")
+        # Жұмсартылған SHORT логикасы (RSI > 55 болса жеткілікті)
+        elif rsi > 55:
+            print(">>> Жұмсартылған SHORT сигналы! Ордер ашылуда...")
             session.set_leverage(category=CATEGORY, symbol=SYMBOL, buyLeverage=str(LEVERAGE), sellLeverage=str(LEVERAGE))
             session.place_order(
                 category=CATEGORY,
+                symbol=SYMBOL,
                 symbol=SYMBOL,
                 side="Sell",
                 orderType="Market",
@@ -96,14 +95,14 @@ def analyze_and_trade(closes):
     except Exception as e:
         print(f"Сауда ордерін орындау қатесі: {e}")
 
-print("Көп индикаторлы (RSI + MACD + Bollinger Bands) сауда боты іске қосылды...")
+print("Жылдамдетілген сауда боты іске қосылды...")
 
 while True:
     try:
         response = session.get_kline(
             category=CATEGORY,
             symbol=SYMBOL,
-            interval="15",
+            interval="1",  # 1 минуттық свечалар
             limit=50
         )
         klines = response.get("result", {}).get("list", [])
@@ -111,7 +110,7 @@ while True:
             closes = [float(k[4]) for k in reversed(klines)]
             analyze_and_trade(closes)
             
-        time.sleep(60)
+        time.sleep(30) # Әр 30 секунд сайын тексеру
     except Exception as e:
         print(f"Қате орын алды: {e}")
         time.sleep(10)
