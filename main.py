@@ -14,7 +14,6 @@ LEVERAGE = 3
 QTY_PER_GRID = 25
 
 session = HTTP(
-    testnet=True,
     api_key=API_KEY,
     api_secret=API_SECRET,
 )
@@ -53,7 +52,6 @@ def analyze_and_trade(closes):
     
     print(f"[{SYMBOL}] Баға: {current_price} | RSI: {current_rsi:.2f} | MACD: {current_macd:.4f}")
     
-    # Сауда логикасы (мысал үшін)
     if current_rsi < 45:
         print(">>> Жұмсартылған LONG сигналы! Ордер ашылуда...")
         try:
@@ -64,7 +62,7 @@ def analyze_and_trade(closes):
                 sellLeverage=str(LEVERAGE)
             )
         except Exception as e:
-            pass # Егер левередж бұрын қойылған болса қатені өткізіп жібереді
+            pass
             
         session.place_order(
             category=CATEGORY,
@@ -99,7 +97,6 @@ def main_loop():
     print("Жылдамдетілген сауда боты іске қосылды...")
     while True:
         try:
-            # Bybit-тен соңғы бағаларды алу
             response = session.get_kline(
                 category=CATEGORY,
                 symbol=SYMBOL,
