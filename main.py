@@ -72,7 +72,7 @@ def analyze_and_trade(closes):
             orderType="Market",
             qty=str(QTY_PER_GRID),
             timeInForce="GTC",
-            positionIdx=0
+            positionIdx=1
         )
     elif current_rsi > 55:
         print(">>> Жұмсартылған SHORT сигналы! Ордер ашылуда...")
@@ -93,7 +93,7 @@ def analyze_and_trade(closes):
             orderType="Market",
             qty=str(QTY_PER_GRID),
             timeInForce="GTC",
-            positionIdx=0
+            positionIdx=2
         )
 
 def main_loop():
