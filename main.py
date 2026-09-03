@@ -1,5 +1,7 @@
 import os
 import time
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import pandas as pd
 from pybit.unified_trading import HTTP
 
@@ -19,6 +21,19 @@ session = HTTP(
     api_key=API_KEY,
     api_secret=API_SECRET,
 )
+
+# Render порт талабын орындау үшін мини веб-сервер
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"Bot is running successfully!")
+
+def run_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    server.serve_forever()
 
 def setup_market():
     try:
@@ -125,7 +140,7 @@ def place_dynamic_grid(current_price, trend_is_bullish):
         for i in range(1, half_grid + 1):
             buy_price = round(current_price * (1 - (GRID_SPACING_PCT * i)), 4)
             try:
-                session.place__order(category=CATEGORY, symbol=SYMBOL, side="Buy", orderType="Limit", price=str(buy_price), qty=str(QTY_PER_GRID), positionIdx=1, postOnly=True)
+                session.place_order(category=CATEGORY, symbol=SYMBOL, side="Buy", orderType="Limit", price=str(buy_price), qty=str(QTY_PER_GRID), positionIdx=1, postOnly=True)
             except Exception as e:
                 print(f"Buy қатесі: {e}")
 
@@ -156,4 +171,9 @@ def run_bot():
             time.sleep(10)
 
 if __name__ == "__main__":
+    # Порт қатесін болдырмау үшін веб-серверді бөлек ағында (thread) қосамыз
+    server_thread = threading.Thread(target=run_server, daemon=True)
+    server_thread.start()
+    
+    # Негізгі сауда ботын іске қосу
     run_bot()
