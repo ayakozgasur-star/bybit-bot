@@ -5,23 +5,20 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import pandas as pd
 from pybit.unified_trading import HTTP
 
-# --- БОТ ҚОСЫМШАСЫНЫҢ ПАРАМЕТРЛЕРІ ---
 API_KEY = os.getenv("BYBIT_API_KEY")
 API_SECRET = os.getenv("BYBIT_API_SECRET")
 SYMBOL = "XRPUSDT"
 CATEGORY = "linear"
 LEVERAGE = 3
-QTY_PER_GRID = 250
-ROI_TARGET = 0.02  # 2% ROI мақсаты
+QTY_PER_GRID = 25
+ROI_TARGET = 0.02
 
-# Bybit Demo сессиясы (api-demo.bybit.com серверіне қосылады)
 session = HTTP(
     demo=True,
     api_key=API_KEY,
     api_secret=API_SECRET,
 )
 
-# Railway UptimeRobot үшін веб-сервер
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -64,10 +61,7 @@ def get_market_data(symbol):
     return None
 
 def calculate_indicators(df):
-    # EMA 20 есептеу
     df["EMA20"] = df["close"].ewm(span=20, adjust=False).mean()
-
-    # RSI 14 есептеу
     delta = df["close"].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
@@ -75,11 +69,24 @@ def calculate_indicators(df):
     df["RSI"] = 100 - (100 / (1 + rs))
     return df
 
+def get_open_position_size(position_idx):
+    try:
+        response = session.get_positions(
+            category=CATEGORY,
+            symbol=SYMBOL
+        )
+        list_pos = response.get("result", {}).get("list", [])
+        for pos in list_pos:
+            if int(pos.get("positionIdx", 0)) == position_idx:
+                size = float(pos.get("size", 0))
+                if size > 0:
+                    return True
+    except Exception as e:
+        print(f"Позицияны тексеру қатесі: {e}")
+    return False
+
 def trading_bot_loop():
-    print(
-        f"Бот іске қосылды! Символ: {SYMBOL}, ROI мақсаты: {ROI_TARGET*100}%, Иық:"
-        f" {LEVERAGE}x"
-    )
+    print(f"Бот іске қосылды! Символ: {SYMBOL}, Иық: {LEVERAGE}x")
 
     while True:
         try:
@@ -95,54 +102,59 @@ def trading_bot_loop():
                     f" ${current_ema:.4f} | RSI: {current_rsi:.2f}"
                 )
 
-                # Қауіпсіздік фильтрі: RSI шектен тыс аймақта болмауын тексеру (30 мен 70 аралығы)
                 if 30 <= current_rsi <= 70:
                     if current_price > current_ema:
-                        print("Сигнал: Лонг шарттары орындалуда. Ордер ашылуда...")
-                        try:
-                            session.set_leverage(
+                        if get_open_position_size(1):
+                            print("ℹ️ Лонг позициясы қазірдің өзінде ашық. Күту режимі.")
+                        else:
+                            print("Сигнал: Лонг шарттары орындалуда. Жаңа ордер ашылуда...")
+                            try:
+                                session.set_leverage(
+                                    category=CATEGORY,
+                                    symbol=SYMBOL,
+                                    buyLeverage=str(LEVERAGE),
+                                    sellLeverage=str(LEVERAGE)
+                                )
+                            except Exception:
+                                pass
+                                
+                            session.place_order(
                                 category=CATEGORY,
                                 symbol=SYMBOL,
-                                buyLeverage=str(LEVERAGE),
-                                sellLeverage=str(LEVERAGE)
+                                side="Buy",
+                                orderType="Market",
+                                qty=str(QTY_PER_GRID),
+                                timeInForce="GTC",
+                                positionIdx=1
                             )
-                        except Exception:
-                            pass
-                            
-                        session.place_order(
-                            category=CATEGORY,
-                            symbol=SYMBOL,
-                            side="Buy",
-                            orderType="Market",
-                            qty=str(QTY_PER_GRID),
-                            timeInForce="GTC",
-                            positionIdx=1  # Hedge Mode үшін Long индексі
-                        )
                     elif current_price < current_ema:
-                        print("Сигнал: Шорт шарттары орындалуда. Ордер ашылуда...")
-                        try:
-                            session.set_leverage(
+                        if get_open_position_size(2):
+                            print("ℹ️ Шорт позициясы қазірдің өзінде ашық. Күту режимі.")
+                        else:
+                            print("Сигнал: Шорт шарттары орындалуда. Жаңа ордер ашылуда...")
+                            try:
+                                session.set_leverage(
+                                    category=CATEGORY,
+                                    symbol=SYMBOL,
+                                    buyLeverage=str(LEVERAGE),
+                                    sellLeverage=str(LEVERAGE)
+                                )
+                            except Exception:
+                                pass
+                                
+                            session.place_order(
                                 category=CATEGORY,
                                 symbol=SYMBOL,
-                                buyLeverage=str(LEVERAGE),
-                                sellLeverage=str(LEVERAGE)
+                                side="Sell",
+                                orderType="Market",
+                                qty=str(QTY_PER_GRID),
+                                timeInForce="GTC",
+                                positionIdx=2
                             )
-                        except Exception:
-                            pass
-                            
-                        session.place_order(
-                            category=CATEGORY,
-                            symbol=SYMBOL,
-                            side="Sell",
-                            orderType="Market",
-                            qty=str(QTY_PER_GRID),
-                            timeInForce="GTC",
-                            positionIdx=2  # Hedge Mode үшін Short индексі
-                        )
                 else:
                     print(f"⚠️ RSI шектен тыс деңгейде ({current_rsi:.2f}). Күту режимі.")
 
-            time.sleep(20)
+            time.sleep(60)
 
         except Exception as e:
             print(f"Қате орын алды: {e}")
