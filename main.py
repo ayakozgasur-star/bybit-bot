@@ -63,7 +63,7 @@ def analyze_and_trade(closes):
     print(f"[{SYMBOL}] Баға: {price} | RSI: {rsi:.2f} | MACD: {macd:.4f}")
 
     try:
-        # Жұмсартылған LONG логикасы (RSI < 45 болса жеткілікті)
+        # Жұмсартылған LONG логикасы (RSI < 45 болса)
         if rsi < 45:
             print(">>> Жұмсартылған LONG сигналы! Ордер ашылуда...")
             session.set_leverage(category=CATEGORY, symbol=SYMBOL, buyLeverage=str(LEVERAGE), sellLeverage=str(LEVERAGE))
@@ -77,13 +77,12 @@ def analyze_and_trade(closes):
             )
             print("LONG ордері сәтті орналастырылды!")
 
-        # Жұмсартылған SHORT логикасы (RSI > 55 болса жеткілікті)
+        # Жұмсартылған SHORT логикасы (RSI > 55 болса)
         elif rsi > 55:
             print(">>> Жұмсартылған SHORT сигналы! Ордер ашылуда...")
             session.set_leverage(category=CATEGORY, symbol=SYMBOL, buyLeverage=str(LEVERAGE), sellLeverage=str(LEVERAGE))
             session.place_order(
                 category=CATEGORY,
-                symbol=SYMBOL,
                 symbol=SYMBOL,
                 side="Sell",
                 orderType="Market",
@@ -110,7 +109,7 @@ while True:
             closes = [float(k[4]) for k in reversed(klines)]
             analyze_and_trade(closes)
             
-        time.sleep(30) # Әр 30 секунд сайын тексеру
+        time.sleep(30)
     except Exception as e:
         print(f"Қате орын алды: {e}")
         time.sleep(10)
