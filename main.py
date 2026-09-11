@@ -3,30 +3,22 @@ import time
 import pandas as pd
 from pybit.unified_trading import HTTP
 
-# ==========================================
-# 1. КОНФИГУРАЦИЯ ЖӘНЕ ПАРАМЕТРЛЕР
-# ==========================================
 API_KEY = os.getenv("BYBIT_API_KEY")
 API_SECRET = os.getenv("BYBIT_API_SECRET")
 
-# Сауда жасайтын монеталар
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "1000PEPEUSDT"]
 
-LEVERAGE = 20           # 20x Плечо
-STOP_LOSS_PCT = 0.005   # 0.5% Stop-Loss
-TAKE_PROFIT_PCT = 0.10  # 10.0% Take-Profit
-QTY_USD = 10            # Әрбір ордерге кіретін маржа (USD)
+LEVERAGE = 20
+STOP_LOSS_PCT = 0.005
+TAKE_PROFIT_PCT = 0.10
+QTY_USD = 10
 
-# Demo Trading үшін demo=True немесе Testnet үшін testnet=True
 session = HTTP(
-    demo=True,          # Bybit Unified Demo Trading қолдану үшін
+    demo=True,
     api_key=API_KEY,
     api_secret=API_SECRET
 )
 
-# ==========================================
-# 2. ИНДИКАТОРЛАРДЫ ЕСЕПТЕУ (Таза pandas)
-# ==========================================
 def calculate_ema(df, window=200):
     return df['close'].ewm(span=window, adjust=False).mean()
 
@@ -72,7 +64,6 @@ def fetch_klines(symbol, interval, limit=200):
         return None
 
 def analyze_market(symbol):
-    # 15m Тренд фильтрі (EMA 200)
     df_15m = fetch_klines(symbol, interval="15", limit=200)
     if df_15m is None or len(df_15m) < 200:
         return None
@@ -80,7 +71,6 @@ def analyze_market(symbol):
     trend_15m_long = df_15m['close'].iloc[-1] > df_15m['ema200'].iloc[-1]
     trend_15m_short = df_15m['close'].iloc[-1] < df_15m['ema200'].iloc[-1]
 
-    # 5m Негізгі Анализ
     df_5m = fetch_klines(symbol, interval="5", limit=100)
     if df_5m is None or len(df_5m) < 50:
         return None
@@ -101,24 +91,32 @@ def analyze_market(symbol):
     
     return None
 
-# ==========================================
-# 3. ОРДЕРЛЕРДІ АШУ ЖӘНЕ РИСК МЕНЕДЖМЕНТ
-# ==========================================
-def set_leverage(symbol):
+def set_leverage_and_mode(symbol):
     try:
         session.set_leverage(category="linear", symbol=symbol, buyLeverage=str(LEVERAGE), sellLeverage=str(LEVERAGE))
     except Exception:
         pass
+    try:
+        # Hedge Mode-қа ауыстыру
+        session.switch_position_mode(category="linear", symbol=symbol, mode=3)
+    except Exception:
+        pass
 
 def open_position(symbol, side):
-    set_leverage(symbol)
+    set_leverage_and_mode(symbol)
     
     ticker = session.get_tickers(category="linear", symbol=symbol)
     price = float(ticker['result']['list'][0]['lastPrice'])
     
-    qty = round((QTY_USD * LEVERAGE) / price, 3)
-    if symbol == "1000PEPEUSDT":
-        qty = int(qty)
+    # Қатаң дөңгелектеу (Qty precision)
+    if symbol == "BTCUSDT":
+        qty = round((QTY_USD * LEVERAGE) / price, 3)
+    elif symbol == "ETHUSDT":
+        qty = round((QTY_USD * LEVERAGE) / price, 2)
+    elif symbol in ["SOLUSDT", "XRPUSDT"]:
+        qty = round((QTY_USD * LEVERAGE) / price, 1)
+    elif symbol == "1000PEPEUSDT":
+        qty = int((QTY_USD * LEVERAGE) / price)
 
     pos_idx = 1 if side == "BUY" else 2
     
@@ -141,15 +139,12 @@ def open_position(symbol, side):
             takeProfit=str(tp_price),
             timeInForce="GTC"
         )
-        print(f"🚀 [DEMO] [{symbol}] {side} Ордер ашылды! Баға: {price} | SL: {sl_price} (-0.5%) | TP: {tp_price} (+10%)")
+        print(f"🚀 [DEMO] [{symbol}] {side} Ордер ашылды! Баға: {price} | Qty: {qty} | SL: {sl_price} | TP: {tp_price}")
     except Exception as e:
         print(f"[{symbol}] Ордер ашудағы қателік: {e}")
 
-# ==========================================
-# 4. БОТТЫҢ НЕГІЗГІ ЦИКЛІ
-# ==========================================
 def run_bot():
-    print("🤖 5m Scalper Bot [DEMO MODE] (20x Leverage, 0.5% SL, 10% TP) іске қосылды...")
+    print("🤖 5m Scalper Bot [DEMO MODE] іске қосылды...")
     while True:
         for symbol in SYMBOLS:
             signal = analyze_market(symbol)
