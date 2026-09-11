@@ -17,14 +17,15 @@ STOP_LOSS_PCT = 0.005   # 0.5% Stop-Loss
 TAKE_PROFIT_PCT = 0.10  # 10.0% Take-Profit
 QTY_USD = 10            # Әрбір ордерге кіретін маржа (USD)
 
+# Demo Trading үшін demo=True немесе Testnet үшін testnet=True
 session = HTTP(
-    testnet=False,
+    demo=True,          # Bybit Unified Demo Trading қолдану үшін
     api_key=API_KEY,
     api_secret=API_SECRET
 )
 
 # ==========================================
-# 2. ИНДИКАТОРЛАРДЫ ТАЗА PANDAS-ПЕН ЕСЕПТЕУ
+# 2. ИНДИКАТОРЛАРДЫ ЕСЕПТЕУ (Таза pandas)
 # ==========================================
 def calculate_ema(df, window=200):
     return df['close'].ewm(span=window, adjust=False).mean()
@@ -54,8 +55,7 @@ def calculate_adx(df, window=14):
     m_di = 100 * (df['m_dm'].rolling(window).mean() / tr_s)
     
     dx = 100 * (abs(p_di - m_di) / (p_di + m_di))
-    adx = dx.rolling(window).mean()
-    return adx
+    return dx.rolling(window).mean()
 
 def fetch_klines(symbol, interval, limit=200):
     try:
@@ -80,7 +80,7 @@ def analyze_market(symbol):
     trend_15m_long = df_15m['close'].iloc[-1] > df_15m['ema200'].iloc[-1]
     trend_15m_short = df_15m['close'].iloc[-1] < df_15m['ema200'].iloc[-1]
 
-    # 5m Негізгі Анализ (RSI, ADX, Volume SMA)
+    # 5m Негізгі Анализ
     df_5m = fetch_klines(symbol, interval="5", limit=100)
     if df_5m is None or len(df_5m) < 50:
         return None
@@ -141,7 +141,7 @@ def open_position(symbol, side):
             takeProfit=str(tp_price),
             timeInForce="GTC"
         )
-        print(f"🚀 [{symbol}] {side} Ордер ашылды! Бағасы: {price} | SL: {sl_price} (-0.5%) | TP: {tp_price} (+10%)")
+        print(f"🚀 [DEMO] [{symbol}] {side} Ордер ашылды! Баға: {price} | SL: {sl_price} (-0.5%) | TP: {tp_price} (+10%)")
     except Exception as e:
         print(f"[{symbol}] Ордер ашудағы қателік: {e}")
 
@@ -149,7 +149,7 @@ def open_position(symbol, side):
 # 4. БОТТЫҢ НЕГІЗГІ ЦИКЛІ
 # ==========================================
 def run_bot():
-    print("🤖 5m Scalper Bot (20x Leverage, 0.5% SL, 10% TP) іске қосылды...")
+    print("🤖 5m Scalper Bot [DEMO MODE] (20x Leverage, 0.5% SL, 10% TP) іске қосылды...")
     while True:
         for symbol in SYMBOLS:
             signal = analyze_market(symbol)
