@@ -1,7 +1,6 @@
 import os
 import time
 import pandas as pd
-import pandas_ta as ta
 from pybit.unified_trading import HTTP
 
 # ==========================================
@@ -16,7 +15,7 @@ SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "1000PEPEUSDT"]
 LEVERAGE = 20           # 20x Плечо
 STOP_LOSS_PCT = 0.005   # 0.5% Stop-Loss
 TAKE_PROFIT_PCT = 0.10  # 10.0% Take-Profit
-QTY_USD = 10            # Арбір ордерге кіретін маржа (USD)
+QTY_USD = 10            # Әрбір ордерге кіретін маржа (USD)
 
 session = HTTP(
     testnet=False,
@@ -25,8 +24,39 @@ session = HTTP(
 )
 
 # ==========================================
-# 2. ИНДИКАТОРЛАР ЖӘНЕ АНАЛИЗ (15m & 5m)
+# 2. ИНДИКАТОРЛАРДЫ ТАЗА PANDAS-ПЕН ЕСЕПТЕУ
 # ==========================================
+def calculate_ema(df, window=200):
+    return df['close'].ewm(span=window, adjust=False).mean()
+
+def calculate_rsi(df, window=14):
+    delta = df['close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+def calculate_adx(df, window=14):
+    df = df.copy()
+    df['tr0'] = abs(df['high'] - df['low'])
+    df['tr1'] = abs(df['high'] - df['close'].shift(1))
+    df['tr2'] = abs(df['low'] - df['close'].shift(1))
+    df['tr'] = df[['tr0', 'tr1', 'tr2']].max(axis=1)
+    
+    df['up'] = df['high'] - df['high'].shift(1)
+    df['down'] = df['low'].shift(1) - df['low']
+    
+    df['p_dm'] = df['up'].where((df['up'] > df['down']) & (df['up'] > 0), 0)
+    df['m_dm'] = df['down'].where((df['down'] > df['up']) & (df['down'] > 0), 0)
+    
+    tr_s = df['tr'].rolling(window).mean()
+    p_di = 100 * (df['p_dm'].rolling(window).mean() / tr_s)
+    m_di = 100 * (df['m_dm'].rolling(window).mean() / tr_s)
+    
+    dx = 100 * (abs(p_di - m_di) / (p_di + m_di))
+    adx = dx.rolling(window).mean()
+    return adx
+
 def fetch_klines(symbol, interval, limit=200):
     try:
         res = session.get_kline(category="linear", symbol=symbol, interval=interval, limit=limit)
@@ -46,7 +76,7 @@ def analyze_market(symbol):
     df_15m = fetch_klines(symbol, interval="15", limit=200)
     if df_15m is None or len(df_15m) < 200:
         return None
-    df_15m['ema200'] = ta.ema(df_15m['close'], length=200)
+    df_15m['ema200'] = calculate_ema(df_15m, 200)
     trend_15m_long = df_15m['close'].iloc[-1] > df_15m['ema200'].iloc[-1]
     trend_15m_short = df_15m['close'].iloc[-1] < df_15m['ema200'].iloc[-1]
 
@@ -55,16 +85,14 @@ def analyze_market(symbol):
     if df_5m is None or len(df_5m) < 50:
         return None
     
-    df_5m['rsi'] = ta.rsi(df_5m['close'], length=14)
-    adx_df = ta.adx(df_5m['high'], df_5m['low'], df_5m['close'], length=14)
-    df_5m['adx'] = adx_df['ADX_14']
-    df_5m['vol_sma'] = ta.sma(df_5m['volume'], length=20)
+    df_5m['rsi'] = calculate_rsi(df_5m, 14)
+    df_5m['adx'] = calculate_adx(df_5m, 14)
+    df_5m['vol_sma'] = df_5m['volume'].rolling(20).mean()
 
     last_5m = df_5m.iloc[-1]
     
-    # Сигналдарды тексеру
     vol_confirm = last_5m['volume'] > last_5m['vol_sma']
-    adx_confirm = last_5m['adx'] > 20
+    adx_confirm = last_5m['adx'] > 20 if pd.notna(last_5m['adx']) else False
 
     if trend_15m_long and last_5m['rsi'] > 55 and vol_confirm and adx_confirm:
         return "BUY"
@@ -74,29 +102,26 @@ def analyze_market(symbol):
     return None
 
 # ==========================================
-# 3. ОРДЕРЛЕРДІ АШУ ЖӘНЕ РИСК МЕНЕДЖМЕНТ (20x, 0.5% SL, 10% TP)
+# 3. ОРДЕРЛЕРДІ АШУ ЖӘНЕ РИСК МЕНЕДЖМЕНТ
 # ==========================================
 def set_leverage(symbol):
     try:
         session.set_leverage(category="linear", symbol=symbol, buyLeverage=str(LEVERAGE), sellLeverage=str(LEVERAGE))
     except Exception:
-        pass  # Егер плечо бұрын қойылған болса, қателікті өткізіп жібереді
+        pass
 
 def open_position(symbol, side):
     set_leverage(symbol)
     
-    # Ағымдағы бағаны алу
     ticker = session.get_tickers(category="linear", symbol=symbol)
     price = float(ticker['result']['list'][0]['lastPrice'])
     
     qty = round((QTY_USD * LEVERAGE) / price, 3)
     if symbol == "1000PEPEUSDT":
-        qty = int(qty) # PEPE үшін бүтін сан қажет
+        qty = int(qty)
 
-    # Hedge Mode позиция индекстері: 1 - Long, 2 - Short
     pos_idx = 1 if side == "BUY" else 2
     
-    # Stop Loss мен Take Profit есептеу
     if side == "BUY":
         sl_price = round(price * (1 - STOP_LOSS_PCT), 4)
         tp_price = round(price * (1 + TAKE_PROFIT_PCT), 4)
@@ -121,7 +146,7 @@ def open_position(symbol, side):
         print(f"[{symbol}] Ордер ашудағы қателік: {e}")
 
 # ==========================================
-# 4. БОТТЫҢ НЕГІЗГІ ЦИКЛІ (Цикл)
+# 4. БОТТЫҢ НЕГІЗГІ ЦИКЛІ
 # ==========================================
 def run_bot():
     print("🤖 5m Scalper Bot (20x Leverage, 0.5% SL, 10% TP) іске қосылды...")
@@ -134,7 +159,6 @@ def run_bot():
             else:
                 print(f"💤 [{symbol}] Сигнал жоқ, күту режимі...")
         
-        # 5 минуттық шамның жабылуын күту (300 секунд)
         time.sleep(300)
 
 if __name__ == "__main__":
