@@ -4,15 +4,17 @@ import pandas as pd
 from pybit.unified_trading import HTTP
 
 # ==========================================
-# 1. КОНФИГУРАЦИЯ
+# 1. КОНФИГУРАЦИЯ ЖӘНЕ ПАРАМЕТРЛЕР
 # ==========================================
 API_KEY = os.getenv("BYBIT_API_KEY")
 API_SECRET = os.getenv("BYBIT_API_SECRET")
 
-SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "1000PEPEUSDT"]
+# Волатильдігі жоғары альткоиндер тізімі
+SYMBOLS = ["SOLUSDT", "XRPUSDT", "1000PEPEUSDT", "NEARUSDT", "AVAXUSDT"]
 
-LEVERAGE = 10           # 10x қауіпсіз плечо
-QTY_USD = 10            # Әр ордерге 10 USD маржа
+LEVERAGE = 10             # 10x қауіпсіз плечо
+RISK_PCT = 0.02           # Баланстың 2%-ын әр ордерге бөлу
+TRAILING_STOP_TRIGGER = 0.015 # +1.5% пайдаға өткенде Трейлинг-стоп іске қосылады
 
 session = HTTP(
     demo=True,
@@ -21,7 +23,7 @@ session = HTTP(
 )
 
 # ==========================================
-# 2. МЫҚТЫ ТЕХНИКАЛЫҚ ИНДИКАТОРЛАР (Pandas)
+# 2. ИНДИКАТОРЛАР ЖӘНЕ АНАЛИЗ (Pandas)
 # ==========================================
 def calculate_ema(series, window):
     return series.ewm(span=window, adjust=False).mean()
@@ -57,14 +59,35 @@ def fetch_klines(symbol, interval, limit=200):
             df[col] = df[col].astype(float)
         return df
     except Exception as e:
-        print(f"[{symbol}] Kline алудағы қате: {e}")
+        print(f"[{symbol}] Kline алудағы қателік: {e}")
         return None
 
+def get_account_balance():
+    try:
+        res = session.get_wallet_balance(accountType="UNIFIED")
+        balance = float(res['result']['list'][0]['totalEquity'])
+        return balance
+    except Exception:
+        return 1000.0  # Дефолттық резервтік баланс
+
+def get_symbol_precision(symbol, price):
+    # Әр монетаның ордер лот өлшемін дәл дөңгелектеу
+    margin_usd = get_account_balance() * RISK_PCT
+    position_usd = margin_usd * LEVERAGE
+    raw_qty = position_usd / price
+
+    if symbol in ["SOLUSDT", "AVAXUSDT", "NEARUSDT"]:
+        return round(raw_qty, 1)
+    elif symbol == "XRPUSDT":
+        return round(raw_qty, 0)
+    elif symbol == "1000PEPEUSDT":
+        return int(raw_qty)
+    return round(raw_qty, 2)
+
 # ==========================================
-# 3. ТЕРЕН ДЕТАЛЬДЫ НАРАҚ АНАЛИЗІ
+# 3. НАРАҚ АНАЛИЗІ (1h + 15m + 5m)
 # ==========================================
 def analyze_market(symbol):
-    # 1-қадам: 1h Жоғары трендті тексеру (EMA50)
     df_1h = fetch_klines(symbol, interval="60", limit=100)
     if df_1h is None or len(df_1h) < 50:
         return None, None
@@ -72,7 +95,6 @@ def analyze_market(symbol):
     trend_1h_long = df_1h['close'].iloc[-1] > df_1h['ema50'].iloc[-1]
     trend_1h_short = df_1h['close'].iloc[-1] < df_1h['ema50'].iloc[-1]
 
-    # 2-қадам: 15m Орташа трендті тексеру (EMA200)
     df_15m = fetch_klines(symbol, interval="15", limit=200)
     if df_15m is None or len(df_15m) < 200:
         return None, None
@@ -80,14 +102,12 @@ def analyze_market(symbol):
     trend_15m_long = df_15m['close'].iloc[-1] > df_15m['ema200'].iloc[-1]
     trend_15m_short = df_15m['close'].iloc[-1] < df_15m['ema200'].iloc[-1]
 
-    # Егер 1h және 15m трендтері сәйкес келмесе — КІРМЕЙМІЗ!
     global_long = trend_1h_long and trend_15m_long
     global_short = trend_1h_short and trend_15m_short
 
     if not (global_long or global_short):
         return None, None
 
-    # 3-қадам: 5m Нақты сигнал торабы (RSI + MACD + Volume + ATR)
     df_5m = fetch_klines(symbol, interval="5", limit=100)
     if df_5m is None or len(df_5m) < 50:
         return None, None
@@ -100,21 +120,19 @@ def analyze_market(symbol):
     last_5m = df_5m.iloc[-1]
     prev_5m = df_5m.iloc[-2]
 
-    # Фильтрлер
-    volume_confirm = last_5m['volume'] > (last_5m['vol_sma'] * 1.3) # Көлем 30% жоғары
+    volume_confirm = last_5m['volume'] > (last_5m['vol_sma'] * 1.25)
     macd_bull = last_5m['macd_hist'] > 0 and last_5m['macd_hist'] > prev_5m['macd_hist']
     macd_bear = last_5m['macd_hist'] < 0 and last_5m['macd_hist'] < prev_5m['macd_hist']
 
-    # Түпкілікті сигнал
-    if global_long and last_5m['rsi'] > 53 and macd_bull and volume_confirm:
+    if global_long and last_5m['rsi'] > 52 and macd_bull and volume_confirm:
         return "BUY", last_5m['atr']
-    elif global_short and last_5m['rsi'] < 47 and macd_bear and volume_confirm:
+    elif global_short and last_5m['rsi'] < 48 and macd_bear and volume_confirm:
         return "SELL", last_5m['atr']
 
     return None, None
 
 # ==========================================
-# 4. ОРДЕР АШУ ЖӘНЕ ДИНАМИКАЛЫҚ ATR РИСК
+# 4. ТРЕЙЛИНГ-СТОП ЖӘНЕ ПОЗИЦИЯЛАРДЫ БАСҚАРУ
 # ==========================================
 def set_leverage_and_mode(symbol):
     try:
@@ -126,27 +144,52 @@ def set_leverage_and_mode(symbol):
     except Exception:
         pass
 
+def manage_trailing_stop():
+    try:
+        positions = session.get_positions(category="linear", settleCoin="USDT")['result']['list']
+        for pos in positions:
+            size = float(pos['size'])
+            if size > 0:
+                symbol = pos['symbol']
+                side = pos['side']
+                entry_price = float(pos['avgPrice'])
+                current_price = float(pos['markPrice'])
+                current_sl = float(pos['stopLoss']) if pos['stopLoss'] else 0.0
+
+                if side == "Buy":
+                    profit_pct = (current_price - entry_price) / entry_price
+                    new_sl = round(entry_price * 1.002, 4) # Безубыток (+0.2%)
+                    if profit_pct >= TRAILING_STOP_TRIGGER and current_sl < new_sl:
+                        session.set_trading_stop(
+                            category="linear", symbol=symbol, positionIdx=1, stopLoss=str(new_sl)
+                        )
+                        print(f"🛡️ [{symbol}] BUY Трейлинг-Стоп іске қосылды! Новая SL бағасы: {new_sl}")
+
+                elif side == "Sell":
+                    profit_pct = (entry_price - current_price) / entry_price
+                    new_sl = round(entry_price * 0.998, 4) # Безубыток
+                    if profit_pct >= TRAILING_STOP_TRIGGER and (current_sl == 0 or current_sl > new_sl):
+                        session.set_trading_stop(
+                            category="linear", symbol=symbol, positionIdx=2, stopLoss=str(new_sl)
+                        )
+                        print(f"🛡️ [{symbol}] SELL Трейлинг-Стоп іске қосылды! Новая SL бағасы: {new_sl}")
+    except Exception as e:
+        print(f"Трейлинг-стоп қателігі: {e}")
+
 def open_position(symbol, side, atr):
     set_leverage_and_mode(symbol)
     
     ticker = session.get_tickers(category="linear", symbol=symbol)
     price = float(ticker['result']['list'][0]['lastPrice'])
     
-    # Qty дөңгелектеу
-    if symbol == "BTCUSDT":
-        qty = round((QTY_USD * LEVERAGE) / price, 3)
-    elif symbol == "ETHUSDT":
-        qty = round((QTY_USD * LEVERAGE) / price, 2)
-    elif symbol in ["SOLUSDT", "XRPUSDT"]:
-        qty = round((QTY_USD * LEVERAGE) / price, 1)
-    elif symbol == "1000PEPEUSDT":
-        qty = int((QTY_USD * LEVERAGE) / price)
+    qty = get_symbol_precision(symbol, price)
+    if qty <= 0:
+        return
 
     pos_idx = 1 if side == "BUY" else 2
     
-    # ATR негізінде Динамикалық SL / TP есептеу
     sl_distance = atr * 1.5
-    tp_distance = atr * 3.0
+    tp_distance = atr * 3.5
 
     if side == "BUY":
         sl_price = round(price - sl_distance, 4)
@@ -167,25 +210,27 @@ def open_position(symbol, side, atr):
             takeProfit=str(tp_price),
             timeInForce="GTC"
         )
-        print(f"🎯 [САПАЛЫ КІРУ] [{symbol}] {side} | Баға: {price} | ATR: {atr:.4f} | SL: {sl_price} | TP: {tp_price}")
+        print(f"🔥 [ОДЕР АШЫЛДЫ] [{symbol}] {side} | Көлем (Qty): {qty} | SL: {sl_price} | TP: {tp_price}")
     except Exception as e:
-        print(f"[{symbol}] Ордер қатесі: {e}")
+        print(f"[{symbol}] Ордер ашудағы қателік: {e}")
 
 # ==========================================
-# 5. БОТТЫ ЖҮРГІЗУ
+# 5. БОТТЫ ЖҮРГІЗУ (ЦИКЛ)
 # ==========================================
 def run_bot():
-    print("🧠 Көпденгейлі терең аналитикалық бот [DEMO] іске қосылды...")
+    print("🚀 Волатильді Альткоиндер Боты [DEMO + 2% Risk + TrailingStop] іске қосылды...")
     while True:
+        manage_trailing_stop() # Ашық ордерлердің трейлинг-стопын тексеру
+        
         for symbol in SYMBOLS:
             signal, atr = analyze_market(symbol)
             if signal and atr:
-                print(f"🔥 [{symbol}] МІНСІЗ СИГНАЛ: {signal}")
+                print(f"⚡ [{symbol}] Сигнал анықталды: {signal}")
                 open_position(symbol, side=signal, atr=atr)
             else:
-                print(f"💤 [{symbol}] Анализ бойынша кіруге әлі ерте...")
+                print(f"💤 [{symbol}] Сигнал жоқ...")
         
-        time.sleep(300) # 5 минуттық шам жабылғанда сканерлеу
+        time.sleep(300)
 
 if __name__ == "__main__":
     run_bot()
