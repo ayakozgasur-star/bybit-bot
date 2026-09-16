@@ -3,18 +3,14 @@ import time
 import pandas as pd
 from pybit.unified_trading import HTTP
 
-# ==========================================
-# 1. КОНФИГУРАЦИЯ ЖӘНЕ ПАРАМЕТРЛЕР
-# ==========================================
 API_KEY = os.getenv("BYBIT_API_KEY")
 API_SECRET = os.getenv("BYBIT_API_SECRET")
 
-# Волатильдігі жоғары альткоиндер тізімі
 SYMBOLS = ["SOLUSDT", "XRPUSDT", "1000PEPEUSDT", "NEARUSDT", "AVAXUSDT"]
 
-LEVERAGE = 10             # 10x қауіпсіз плечо
-RISK_PCT = 0.02           # Баланстың 2%-ын әр ордерге бөлу
-TRAILING_STOP_TRIGGER = 0.015 # +1.5% пайдаға өткенде Трейлинг-стоп іске қосылады
+LEVERAGE = 10             
+RISK_PCT = 0.02           
+TRAILING_STOP_TRIGGER = 0.006 # +0.6% баға өзгергенде бірден безубытокқа өтеді (+6% PnL)
 
 session = HTTP(
     demo=True,
@@ -22,9 +18,6 @@ session = HTTP(
     api_secret=API_SECRET
 )
 
-# ==========================================
-# 2. ИНДИКАТОРЛАР ЖӘНЕ АНАЛИЗ (Pandas)
-# ==========================================
 def calculate_ema(series, window):
     return series.ewm(span=window, adjust=False).mean()
 
@@ -59,7 +52,7 @@ def fetch_klines(symbol, interval, limit=200):
             df[col] = df[col].astype(float)
         return df
     except Exception as e:
-        print(f"[{symbol}] Kline алудағы қателік: {e}")
+        print(f"[{symbol}] Kline алу қатесі: {e}")
         return None
 
 def get_account_balance():
@@ -68,10 +61,9 @@ def get_account_balance():
         balance = float(res['result']['list'][0]['totalEquity'])
         return balance
     except Exception:
-        return 1000.0  # Дефолттық резервтік баланс
+        return 1000.0
 
 def get_symbol_precision(symbol, price):
-    # Әр монетаның ордер лот өлшемін дәл дөңгелектеу
     margin_usd = get_account_balance() * RISK_PCT
     position_usd = margin_usd * LEVERAGE
     raw_qty = position_usd / price
@@ -84,9 +76,6 @@ def get_symbol_precision(symbol, price):
         return int(raw_qty)
     return round(raw_qty, 2)
 
-# ==========================================
-# 3. НАРАҚ АНАЛИЗІ (1h + 15m + 5m)
-# ==========================================
 def analyze_market(symbol):
     df_1h = fetch_klines(symbol, interval="60", limit=100)
     if df_1h is None or len(df_1h) < 50:
@@ -131,9 +120,6 @@ def analyze_market(symbol):
 
     return None, None
 
-# ==========================================
-# 4. ТРЕЙЛИНГ-СТОП ЖӘНЕ ПОЗИЦИЯЛАРДЫ БАСҚАРУ
-# ==========================================
 def set_leverage_and_mode(symbol):
     try:
         session.set_leverage(category="linear", symbol=symbol, buyLeverage=str(LEVERAGE), sellLeverage=str(LEVERAGE))
@@ -158,21 +144,21 @@ def manage_trailing_stop():
 
                 if side == "Buy":
                     profit_pct = (current_price - entry_price) / entry_price
-                    new_sl = round(entry_price * 1.002, 4) # Безубыток (+0.2%)
-                    if profit_pct >= TRAILING_STOP_TRIGGER and current_sl < new_sl:
+                    new_sl = round(entry_price * 1.001, 6) # Безубыток +0.1%
+                    if profit_pct >= TRAILING_STOP_TRIGGER and (current_sl < new_sl or current_sl == 0):
                         session.set_trading_stop(
                             category="linear", symbol=symbol, positionIdx=1, stopLoss=str(new_sl)
                         )
-                        print(f"🛡️ [{symbol}] BUY Трейлинг-Стоп іске қосылды! Новая SL бағасы: {new_sl}")
+                        print(f"🛡️ [{symbol}] BUY Трейлинг-Стоп іске қосылды! Жаңа SL: {new_sl}")
 
                 elif side == "Sell":
                     profit_pct = (entry_price - current_price) / entry_price
-                    new_sl = round(entry_price * 0.998, 4) # Безубыток
-                    if profit_pct >= TRAILING_STOP_TRIGGER and (current_sl == 0 or current_sl > new_sl):
+                    new_sl = round(entry_price * 0.999, 6) # Безубыток +0.1%
+                    if profit_pct >= TRAILING_STOP_TRIGGER and (current_sl > new_sl or current_sl == 0):
                         session.set_trading_stop(
                             category="linear", symbol=symbol, positionIdx=2, stopLoss=str(new_sl)
                         )
-                        print(f"🛡️ [{symbol}] SELL Трейлинг-Стоп іске қосылды! Новая SL бағасы: {new_sl}")
+                        print(f"🛡️ [{symbol}] SELL Трейлинг-Стоп іске қосылды! Жаңа SL: {new_sl}")
     except Exception as e:
         print(f"Трейлинг-стоп қателігі: {e}")
 
@@ -192,11 +178,11 @@ def open_position(symbol, side, atr):
     tp_distance = atr * 3.5
 
     if side == "BUY":
-        sl_price = round(price - sl_distance, 4)
-        tp_price = round(price + tp_distance, 4)
+        sl_price = round(price - sl_distance, 6)
+        tp_price = round(price + tp_distance, 6)
     else:
-        sl_price = round(price + sl_distance, 4)
-        tp_price = round(price - tp_distance, 4)
+        sl_price = round(price + sl_distance, 6)
+        tp_price = round(price - tp_distance, 6)
 
     try:
         session.place_order(
@@ -210,27 +196,23 @@ def open_position(symbol, side, atr):
             takeProfit=str(tp_price),
             timeInForce="GTC"
         )
-        print(f"🔥 [ОДЕР АШЫЛДЫ] [{symbol}] {side} | Көлем (Qty): {qty} | SL: {sl_price} | TP: {tp_price}")
+        print(f"🔥 [ОДЕР АШЫЛДЫ] [{symbol}] {side} | Qty: {qty} | SL: {sl_price} | TP: {tp_price}")
     except Exception as e:
-        print(f"[{symbol}] Ордер ашудағы қателік: {e}")
+        print(f"[{symbol}] Ордер ашу қатесі: {e}")
 
-# ==========================================
-# 5. БОТТЫ ЖҮРГІЗУ (ЦИКЛ)
-# ==========================================
 def run_bot():
-    print("🚀 Волатильді Альткоиндер Боты [DEMO + 2% Risk + TrailingStop] іске қосылды...")
+    print("🚀 Бот іске қосылды (Трейлинг-Стоп сезгіштігі арттырылды: +0.6%)...")
     while True:
-        manage_trailing_stop() # Ашық ордерлердің трейлинг-стопын тексеру
+        manage_trailing_stop()
         
         for symbol in SYMBOLS:
             signal, atr = analyze_market(symbol)
             if signal and atr:
-                print(f"⚡ [{symbol}] Сигнал анықталды: {signal}")
                 open_position(symbol, side=signal, atr=atr)
             else:
                 print(f"💤 [{symbol}] Сигнал жоқ...")
         
-        time.sleep(300)
+        time.sleep(150) # 2.5 минут сайын тексеру
 
 if __name__ == "__main__":
     run_bot()
