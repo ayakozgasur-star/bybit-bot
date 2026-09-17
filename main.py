@@ -10,7 +10,7 @@ SYMBOLS = ["SOLUSDT", "XRPUSDT", "1000PEPEUSDT", "NEARUSDT", "AVAXUSDT"]
 
 LEVERAGE = 10             
 RISK_PCT = 0.02           
-TRAILING_STOP_TRIGGER = 0.006 # +0.6% баға өзгергенде бірден безубытокқа өтеді (+6% PnL)
+TRAILING_STOP_TRIGGER = 0.006 # +0.6% пайдада Трейлинг іске қосылады
 
 session = HTTP(
     demo=True,
@@ -144,7 +144,7 @@ def manage_trailing_stop():
 
                 if side == "Buy":
                     profit_pct = (current_price - entry_price) / entry_price
-                    new_sl = round(entry_price * 1.001, 6) # Безубыток +0.1%
+                    new_sl = round(entry_price * 1.003, 6) # +0.3% Безубыток
                     if profit_pct >= TRAILING_STOP_TRIGGER and (current_sl < new_sl or current_sl == 0):
                         session.set_trading_stop(
                             category="linear", symbol=symbol, positionIdx=1, stopLoss=str(new_sl)
@@ -153,7 +153,7 @@ def manage_trailing_stop():
 
                 elif side == "Sell":
                     profit_pct = (entry_price - current_price) / entry_price
-                    new_sl = round(entry_price * 0.999, 6) # Безубыток +0.1%
+                    new_sl = round(entry_price * 0.997, 6) # +0.3% Безубыток
                     if profit_pct >= TRAILING_STOP_TRIGGER and (current_sl > new_sl or current_sl == 0):
                         session.set_trading_stop(
                             category="linear", symbol=symbol, positionIdx=2, stopLoss=str(new_sl)
@@ -168,40 +168,85 @@ def open_position(symbol, side, atr):
     ticker = session.get_tickers(category="linear", symbol=symbol)
     price = float(ticker['result']['list'][0]['lastPrice'])
     
-    qty = get_symbol_precision(symbol, price)
-    if qty <= 0:
+    total_qty = get_symbol_precision(symbol, price)
+    if total_qty <= 0:
         return
+
+    # Позицияны 2-ге бөлеміз (50% TP1, 50% TP2)
+    qty_tp1 = total_qty / 2
+    if symbol in ["SOLUSDT", "AVAXUSDT", "NEARUSDT"]:
+        qty_tp1 = round(qty_tp1, 1)
+    elif symbol == "XRPUSDT":
+        qty_tp1 = round(qty_tp1, 0)
+    elif symbol == "1000PEPEUSDT":
+        qty_tp1 = int(qty_tp1)
+    else:
+        qty_tp1 = round(qty_tp1, 2)
+
+    qty_tp2 = total_qty - qty_tp1
 
     pos_idx = 1 if side == "BUY" else 2
     
     sl_distance = atr * 1.5
-    tp_distance = atr * 3.5
+    tp1_distance = atr * 1.0  # Жақын TP1 (Жылдам фиксация)
+    tp2_distance = atr * 2.5  # Алыс TP2 (Тренд бойынша үлкен профит)
 
     if side == "BUY":
         sl_price = round(price - sl_distance, 6)
-        tp_price = round(price + tp_distance, 6)
+        tp1_price = round(price + tp1_distance, 6)
+        tp2_price = round(price + tp2_distance, 6)
+        close_side = "Sell"
     else:
         sl_price = round(price + sl_distance, 6)
-        tp_price = round(price - tp_distance, 6)
+        tp1_price = round(price - tp1_distance, 6)
+        tp2_price = round(price - tp2_distance, 6)
+        close_side = "Buy"
 
     try:
+        # 1. Негізгі позицияны ашу (Жалпы Стоп-Лосспен)
         session.place_order(
             category="linear",
             symbol=symbol,
             side=side,
             orderType="Market",
-            qty=str(qty),
+            qty=str(total_qty),
             positionIdx=pos_idx,
             stopLoss=str(sl_price),
-            takeProfit=str(tp_price),
             timeInForce="GTC"
         )
-        print(f"🔥 [ОДЕР АШЫЛДЫ] [{symbol}] {side} | Qty: {qty} | SL: {sl_price} | TP: {tp_price}")
+        
+        # 2. TP1 ордерін қою (көлемнің 50%-ы)
+        session.place_order(
+            category="linear",
+            symbol=symbol,
+            side=close_side,
+            orderType="Limit",
+            price=str(tp1_price),
+            qty=str(qty_tp1),
+            positionIdx=pos_idx,
+            reduceOnly=True,
+            timeInForce="GTC"
+        )
+
+        # 3. TP2 ордерін қою (қалған 50%-ы)
+        session.place_order(
+            category="linear",
+            symbol=symbol,
+            side=close_side,
+            orderType="Limit",
+            price=str(tp2_price),
+            qty=str(qty_tp2),
+            positionIdx=pos_idx,
+            reduceOnly=True,
+            timeInForce="GTC"
+        )
+
+        print(f"🔥 [ОДЕР АШЫЛДЫ] [{symbol}] {side} | Qty: {total_qty} | SL: {sl_price} | TP1: {tp1_price} | TP2: {tp2_price}")
     except Exception as e:
         print(f"[{symbol}] Ордер ашу қатесі: {e}")
 
 def run_bot():
-    print("🚀 Бот іске қосылды (Трейлинг-Стоп сезгіштігі арттырылды: +0.6%)...")
+    print("🚀 Бот іске қосылды (2 Тейк-Профит: TP1 50% + TP2 50%)...")
     while True:
         manage_trailing_stop()
         
@@ -212,7 +257,7 @@ def run_bot():
             else:
                 print(f"💤 [{symbol}] Сигнал жоқ...")
         
-        time.sleep(150) # 2.5 минут сайын тексеру
+        time.sleep(150)
 
 if __name__ == "__main__":
     run_bot()
