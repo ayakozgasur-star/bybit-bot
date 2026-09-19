@@ -11,6 +11,7 @@ SYMBOLS = ["SOLUSDT", "XRPUSDT", "1000PEPEUSDT", "NEARUSDT", "AVAXUSDT"]
 LEVERAGE = 10             
 RISK_PCT = 0.02           
 TRAILING_STOP_TRIGGER = 0.006 # +0.6% пайдада Трейлинг іске қосылады
+MAX_ACTIVE_POSITIONS = 2      # Депозитті қорғау үшін бір уақытта максимум 2 позиция ашылады
 
 session = HTTP(
     demo=True,
@@ -63,6 +64,27 @@ def get_account_balance():
     except Exception:
         return 1000.0
 
+def get_active_positions_count():
+    try:
+        res = session.get_positions(category="linear", settleCoin="USDT")['result']['list']
+        active_count = sum(1 for pos in res if float(pos['size']) > 0)
+        return active_count
+    except Exception:
+        return 0
+
+def check_btc_trend():
+    """Биткоиннің 15m трендін тексереді (Альткоиндерді қорғау үшін)"""
+    df_btc = fetch_klines("BTCUSDT", interval="15", limit=50)
+    if df_btc is None or len(df_btc) < 20:
+        return True, True
+    df_btc['ema20'] = calculate_ema(df_btc['close'], 20)
+    last_close = df_btc['close'].iloc[-1]
+    last_ema = df_btc['ema20'].iloc[-1]
+    
+    btc_bullish = last_close > last_ema
+    btc_bearish = last_close < last_ema
+    return btc_bullish, btc_bearish
+
 def get_symbol_precision(symbol, price):
     margin_usd = get_account_balance() * RISK_PCT
     position_usd = margin_usd * LEVERAGE
@@ -105,17 +127,24 @@ def analyze_market(symbol):
     _, _, df_5m['macd_hist'] = calculate_macd(df_5m['close'])
     df_5m['vol_sma'] = df_5m['volume'].rolling(20).mean()
     df_5m['atr'] = calculate_atr(df_5m, 14)
+    df_5m['ema20'] = calculate_ema(df_5m['close'], 20)
 
     last_5m = df_5m.iloc[-1]
     prev_5m = df_5m.iloc[-2]
 
-    volume_confirm = last_5m['volume'] > (last_5m['vol_sma'] * 1.25)
+    volume_confirm = last_5m['volume'] > (last_5m['vol_sma'] * 1.2)
     macd_bull = last_5m['macd_hist'] > 0 and last_5m['macd_hist'] > prev_5m['macd_hist']
     macd_bear = last_5m['macd_hist'] < 0 and last_5m['macd_hist'] < prev_5m['macd_hist']
 
-    if global_long and last_5m['rsi'] > 52 and macd_bull and volume_confirm:
+    ema_5m_long = last_5m['close'] > last_5m['ema20']
+    ema_5m_short = last_5m['close'] < last_5m['ema20']
+
+    # BTC трендін тексеру
+    btc_bullish, btc_bearish = check_btc_trend()
+
+    if global_long and ema_5m_long and btc_bullish and last_5m['rsi'] > 52 and macd_bull and volume_confirm:
         return "BUY", last_5m['atr']
-    elif global_short and last_5m['rsi'] < 48 and macd_bear and volume_confirm:
+    elif global_short and ema_5m_short and btc_bearish and last_5m['rsi'] < 48 and macd_bear and volume_confirm:
         return "SELL", last_5m['atr']
 
     return None, None
@@ -144,7 +173,7 @@ def manage_trailing_stop():
 
                 if side == "Buy":
                     profit_pct = (current_price - entry_price) / entry_price
-                    new_sl = round(entry_price * 1.003, 6) # +0.3% Безубыток
+                    new_sl = round(entry_price * 1.003, 6) # +0.3% безубыток (комиссия қорғанысы)
                     if profit_pct >= TRAILING_STOP_TRIGGER and (current_sl < new_sl or current_sl == 0):
                         session.set_trading_stop(
                             category="linear", symbol=symbol, positionIdx=1, stopLoss=str(new_sl)
@@ -153,7 +182,7 @@ def manage_trailing_stop():
 
                 elif side == "Sell":
                     profit_pct = (entry_price - current_price) / entry_price
-                    new_sl = round(entry_price * 0.997, 6) # +0.3% Безубыток
+                    new_sl = round(entry_price * 0.997, 6) # +0.3% безубыток (комиссия қорғанысы)
                     if profit_pct >= TRAILING_STOP_TRIGGER and (current_sl > new_sl or current_sl == 0):
                         session.set_trading_stop(
                             category="linear", symbol=symbol, positionIdx=2, stopLoss=str(new_sl)
@@ -163,90 +192,49 @@ def manage_trailing_stop():
         print(f"Трейлинг-стоп қателігі: {e}")
 
 def open_position(symbol, side, atr):
+    if get_active_positions_count() >= MAX_ACTIVE_POSITIONS:
+        print(f"⚠️ [{symbol}] Лимит толып тұр (Макс {MAX_ACTIVE_POSITIONS} ордер). Өткізіп жіберілді.")
+        return
+
     set_leverage_and_mode(symbol)
     
     ticker = session.get_tickers(category="linear", symbol=symbol)
     price = float(ticker['result']['list'][0]['lastPrice'])
     
-    total_qty = get_symbol_precision(symbol, price)
-    if total_qty <= 0:
+    qty = get_symbol_precision(symbol, price)
+    if qty <= 0:
         return
-
-    # Позицияны 2-ге бөлеміз (50% TP1, 50% TP2)
-    qty_tp1 = total_qty / 2
-    if symbol in ["SOLUSDT", "AVAXUSDT", "NEARUSDT"]:
-        qty_tp1 = round(qty_tp1, 1)
-    elif symbol == "XRPUSDT":
-        qty_tp1 = round(qty_tp1, 0)
-    elif symbol == "1000PEPEUSDT":
-        qty_tp1 = int(qty_tp1)
-    else:
-        qty_tp1 = round(qty_tp1, 2)
-
-    qty_tp2 = total_qty - qty_tp1
 
     pos_idx = 1 if side == "BUY" else 2
     
-    sl_distance = atr * 1.5
-    tp1_distance = atr * 1.0  # Жақын TP1 (Жылдам фиксация)
-    tp2_distance = atr * 2.5  # Алыс TP2 (Тренд бойынша үлкен профит)
+    sl_distance = atr * 1.0
+    tp_distance = atr * 2.0
 
     if side == "BUY":
         sl_price = round(price - sl_distance, 6)
-        tp1_price = round(price + tp1_distance, 6)
-        tp2_price = round(price + tp2_distance, 6)
-        close_side = "Sell"
+        tp_price = round(price + tp_distance, 6)
     else:
         sl_price = round(price + sl_distance, 6)
-        tp1_price = round(price - tp1_distance, 6)
-        tp2_price = round(price - tp2_distance, 6)
-        close_side = "Buy"
+        tp_price = round(price - tp_distance, 6)
 
     try:
-        # 1. Негізгі позицияны ашу (Жалпы Стоп-Лосспен)
         session.place_order(
             category="linear",
             symbol=symbol,
             side=side,
             orderType="Market",
-            qty=str(total_qty),
+            qty=str(qty),
             positionIdx=pos_idx,
             stopLoss=str(sl_price),
+            takeProfit=str(tp_price),
             timeInForce="GTC"
         )
-        
-        # 2. TP1 ордерін қою (көлемнің 50%-ы)
-        session.place_order(
-            category="linear",
-            symbol=symbol,
-            side=close_side,
-            orderType="Limit",
-            price=str(tp1_price),
-            qty=str(qty_tp1),
-            positionIdx=pos_idx,
-            reduceOnly=True,
-            timeInForce="GTC"
-        )
-
-        # 3. TP2 ордерін қою (қалған 50%-ы)
-        session.place_order(
-            category="linear",
-            symbol=symbol,
-            side=close_side,
-            orderType="Limit",
-            price=str(tp2_price),
-            qty=str(qty_tp2),
-            positionIdx=pos_idx,
-            reduceOnly=True,
-            timeInForce="GTC"
-        )
-
-        print(f"🔥 [ОДЕР АШЫЛДЫ] [{symbol}] {side} | Qty: {total_qty} | SL: {sl_price} | TP1: {tp1_price} | TP2: {tp2_price}")
+        print(f"🔥 [ОДЕР АШЫЛДЫ] [{symbol}] {side} | Qty: {qty} | SL: {sl_price} | TP: {tp_price}")
     except Exception as e:
         print(f"[{symbol}] Ордер ашу қатесі: {e}")
 
 def run_bot():
-    print("🚀 Бот іске қосылды (2 Тейк-Профит: TP1 50% + TP2 50%)...")
+    print("🚀 Бот іске қосылды (BTC фильтрі + Ордерлер лимиті + 1:2 Risk/Reward)...")
     while True:
         manage_trailing_stop()
         
