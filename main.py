@@ -9,9 +9,9 @@ API_SECRET = os.getenv("BYBIT_API_SECRET")
 SYMBOLS = ["SOLUSDT", "XRPUSDT", "1000PEPEUSDT", "NEARUSDT", "AVAXUSDT"]
 
 LEVERAGE = 10             
-RISK_PCT = 0.02           
-TRAILING_STOP_TRIGGER = 0.006 # +0.6% пайдада Трейлинг іске қосылады
-MAX_ACTIVE_POSITIONS = 2      # Депозитті қорғау үшін бір уақытта максимум 2 позиция ашылады
+RISK_PCT = 0.10               # 10% агрессивті маржа (Депозиттің 10%-ы)
+TRAILING_STOP_TRIGGER = 0.004 # +0.4% өсімде Трейлинг іске қосылады
+MAX_ACTIVE_POSITIONS = 2      # Бір уақытта максимум 2 позиция
 
 session = HTTP(
     demo=True,
@@ -73,7 +73,6 @@ def get_active_positions_count():
         return 0
 
 def check_btc_trend():
-    """Биткоиннің 15m трендін тексереді (Альткоиндерді қорғау үшін)"""
     df_btc = fetch_klines("BTCUSDT", interval="15", limit=50)
     if df_btc is None or len(df_btc) < 20:
         return True, True
@@ -139,7 +138,6 @@ def analyze_market(symbol):
     ema_5m_long = last_5m['close'] > last_5m['ema20']
     ema_5m_short = last_5m['close'] < last_5m['ema20']
 
-    # BTC трендін тексеру
     btc_bullish, btc_bearish = check_btc_trend()
 
     if global_long and ema_5m_long and btc_bullish and last_5m['rsi'] > 52 and macd_bull and volume_confirm:
@@ -173,7 +171,7 @@ def manage_trailing_stop():
 
                 if side == "Buy":
                     profit_pct = (current_price - entry_price) / entry_price
-                    new_sl = round(entry_price * 1.003, 6) # +0.3% безубыток (комиссия қорғанысы)
+                    new_sl = round(entry_price * 1.002, 6) # +0.2% безубыток (комиссияны жабады)
                     if profit_pct >= TRAILING_STOP_TRIGGER and (current_sl < new_sl or current_sl == 0):
                         session.set_trading_stop(
                             category="linear", symbol=symbol, positionIdx=1, stopLoss=str(new_sl)
@@ -182,7 +180,7 @@ def manage_trailing_stop():
 
                 elif side == "Sell":
                     profit_pct = (entry_price - current_price) / entry_price
-                    new_sl = round(entry_price * 0.997, 6) # +0.3% безубыток (комиссия қорғанысы)
+                    new_sl = round(entry_price * 0.998, 6) # +0.2% безубыток
                     if profit_pct >= TRAILING_STOP_TRIGGER and (current_sl > new_sl or current_sl == 0):
                         session.set_trading_stop(
                             category="linear", symbol=symbol, positionIdx=2, stopLoss=str(new_sl)
@@ -208,7 +206,7 @@ def open_position(symbol, side, atr):
     pos_idx = 1 if side == "BUY" else 2
     
     sl_distance = atr * 1.0
-    tp_distance = atr * 2.0
+    tp_distance = atr * 1.5  # Тейк-Профит тез арада жабылу үшін жақындатылды
 
     if side == "BUY":
         sl_price = round(price - sl_distance, 6)
@@ -234,7 +232,7 @@ def open_position(symbol, side, atr):
         print(f"[{symbol}] Ордер ашу қатесі: {e}")
 
 def run_bot():
-    print("🚀 Бот іске қосылды (BTC фильтрі + Ордерлер лимиті + 1:2 Risk/Reward)...")
+    print("🚀 Бот іске қосылды (10% Маржа + +0.4% Трейлинг + BTC Фильтр)...")
     while True:
         manage_trailing_stop()
         
