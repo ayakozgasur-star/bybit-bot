@@ -3,158 +3,250 @@ import time
 import pandas as pd
 from pybit.unified_trading import HTTP
 
+# 1. API КИЛЕРІН АЛУ
 API_KEY = os.getenv("BYBIT_API_KEY")
 API_SECRET = os.getenv("BYBIT_API_SECRET")
 
-SYMBOL = "XRPUSDT"
-CATEGORY = "linear"
-LEVERAGE = 3
-GRID_COUNT = 8
-GRID_SPACING_PCT = 0.01
-QTY_PER_GRID = 250
-TARGET_ROI_PCT = 2.5 # Пайда 2.5% ROI-ге жеткенде автоматты түрде жабылады
+# 2. НЕГІЗГІ БАПТАУЛАР
+SYMBOLS = ["SOLUSDT", "XRPUSDT", "1000PEPEUSDT", "NEARUSDT", "AVAXUSDT"]
 
+LEVERAGE = 10             # 10x Плечо
+RISK_PCT = 0.10           # 10% Маржа ($100)
+TRAILING_STOP_TRIGGER = 0.002 # +0.2% өсімде Трейлинг іске қосылады
+MAX_ACTIVE_POSITIONS = 2  # Бір уақытта максимум 2 позиция
+
+# 3. BYBIT СЕССИЯСЫН ҚОСУ (Demo)
 session = HTTP(
     demo=True,
     api_key=API_KEY,
-    api_secret=API_SECRET,
+    api_secret=API_SECRET
 )
 
-def setup_market():
-    try:
-        session.set_leverage(
-            category=CATEGORY,
-            symbol=SYMBOL,
-            buyLeverage=str(LEVERAGE),
-            sellLeverage=str(LEVERAGE),
-        )
-        print(f"✅ {SYMBOL} үшін иық {LEVERAGE}x болып орнатылды.")
-    except Exception as e:
-        print(f"ℹ️ Иық баптауы ескертуі: {e}")
+def calculate_ema(series, window):
+    return series.ewm(span=window, adjust=False).mean()
 
-def get_market_data():
-    response = session.get_kline(category=CATEGORY, symbol=SYMBOL, interval="15", limit=50)
-    data = response['result']['list']
-    df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
-    df['close'] = df['close'].astype(float)
-    # RSI есептеу
-    delta = df['close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+def calculate_rsi(series, window=14):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
     rs = gain / loss
-    df['rsi'] = 100 - (100 / (1 + rs))
-    # EMA (Trend) есептеу - 20 периоды
-    df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
-    return df['close'].iloc[-1], df['rsi'].iloc[-1], df['ema20'].iloc[-1]
+    return 100 - (100 / (1 + rs))
 
-def clear_orders():
+def calculate_atr(df, window=14):
+    high_low = df['high'] - df['low']
+    high_close = abs(df['high'] - df['close'].shift(1))
+    low_close = abs(df['low'] - df['close'].shift(1))
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    return tr.rolling(window).mean()
+
+def calculate_macd(series, fast=12, slow=26, signal=9):
+    ema_fast = calculate_ema(series, fast)
+    ema_slow = calculate_ema(series, slow)
+    macd_line = ema_fast - ema_slow
+    signal_line = calculate_ema(macd_line, signal)
+    hist = macd_line - signal_line
+    return macd_line, signal_line, hist
+
+def fetch_klines(symbol, interval, limit=200):
     try:
-        session.cancel_all_orders(category=CATEGORY, symbol=SYMBOL)
+        res = session.get_kline(category="linear", symbol=symbol, interval=interval, limit=limit)
+        df = pd.DataFrame(res['result']['list'], columns=['time', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
+        df = df.iloc[::-1].reset_index(drop=True)
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            df[col] = df[col].astype(float)
+        return df
     except Exception as e:
-        print(f"Ордерлерді өшіру қатесі: {e}")
+        print(f"[{symbol}] Kline алу қатесі: {e}")
+        return None
 
-def check_and_take_profit():
-    """Ашық позицияның пайдасы 2.5% ROI жетсе, оны жауып пайданы бекітеді"""
+def get_account_balance():
     try:
-        res = session.get_positions(category=CATEGORY, symbol=SYMBOL)
-        positions = res['result']['list']
+        res = session.get_wallet_balance(accountType="UNIFIED")
+        balance = float(res['result']['list'][0]['totalEquity'])
+        return balance
+    except Exception:
+        return 1000.0
+
+def get_active_positions_count():
+    try:
+        res = session.get_positions(category="linear", settleCoin="USDT")['result']['list']
+        active_count = sum(1 for pos in res if float(pos['size']) > 0)
+        return active_count
+    except Exception:
+        return 0
+
+def check_btc_trend():
+    df_btc = fetch_klines("BTCUSDT", interval="15", limit=50)
+    if df_btc is None or len(df_btc) < 20:
+        return True, True
+    df_btc['ema20'] = calculate_ema(df_btc['close'], 20)
+    last_close = df_btc['close'].iloc[-1]
+    last_ema = df_btc['ema20'].iloc[-1]
+    
+    btc_bullish = last_close > last_ema
+    btc_bearish = last_close < last_ema
+    return btc_bullish, btc_bearish
+
+def get_symbol_precision(symbol, price):
+    margin_usd = get_account_balance() * RISK_PCT
+    position_usd = margin_usd * LEVERAGE
+    raw_qty = position_usd / price
+
+    if symbol in ["SOLUSDT", "AVAXUSDT", "NEARUSDT"]:
+        return round(raw_qty, 1)
+    elif symbol == "XRPUSDT":
+        return round(raw_qty, 0)
+    elif symbol == "1000PEPEUSDT":
+        return int(raw_qty)
+    return round(raw_qty, 2)
+
+def analyze_market(symbol):
+    df_1h = fetch_klines(symbol, interval="60", limit=100)
+    if df_1h is None or len(df_1h) < 50:
+        return None, None
+    df_1h['ema50'] = calculate_ema(df_1h['close'], 50)
+    trend_1h_long = df_1h['close'].iloc[-1] > df_1h['ema50'].iloc[-1]
+    trend_1h_short = df_1h['close'].iloc[-1] < df_1h['ema50'].iloc[-1]
+
+    df_15m = fetch_klines(symbol, interval="15", limit=200)
+    if df_15m is None or len(df_15m) < 200:
+        return None, None
+    df_15m['ema200'] = calculate_ema(df_15m['close'], 200)
+    trend_15m_long = df_15m['close'].iloc[-1] > df_15m['ema200'].iloc[-1]
+    trend_15m_short = df_15m['close'].iloc[-1] < df_15m['ema200'].iloc[-1]
+
+    global_long = trend_1h_long and trend_15m_long
+    global_short = trend_1h_short and trend_15m_short
+
+    if not (global_long or global_short):
+        return None, None
+
+    df_5m = fetch_klines(symbol, interval="5", limit=100)
+    if df_5m is None or len(df_5m) < 50:
+        return None, None
+
+    df_5m['rsi'] = calculate_rsi(df_5m['close'], 14)
+    _, _, df_5m['macd_hist'] = calculate_macd(df_5m['close'])
+    df_5m['vol_sma'] = df_5m['volume'].rolling(20).mean()
+    df_5m['atr'] = calculate_atr(df_5m, 14)
+    df_5m['ema20'] = calculate_ema(df_5m['close'], 20)
+
+    last_5m = df_5m.iloc[-1]
+    prev_5m = df_5m.iloc[-2]
+
+    volume_confirm = last_5m['volume'] > (last_5m['vol_sma'] * 1.2)
+    macd_bull = last_5m['macd_hist'] > 0 and last_5m['macd_hist'] > prev_5m['macd_hist']
+    macd_bear = last_5m['macd_hist'] < 0 and last_5m['macd_hist'] < prev_5m['macd_hist']
+
+    ema_5m_long = last_5m['close'] > last_5m['ema20']
+    ema_5m_short = last_5m['close'] < last_5m['ema20']
+
+    btc_bullish, btc_bearish = check_btc_trend()
+
+    if global_long and ema_5m_long and btc_bullish and last_5m['rsi'] > 52 and macd_bull and volume_confirm:
+        return "BUY", last_5m['atr']
+    elif global_short and ema_5m_short and btc_bearish and last_5m['rsi'] < 48 and macd_bear and volume_confirm:
+        return "SELL", last_5m['atr']
+
+    return None, None
+
+def set_leverage_and_mode(symbol):
+    try:
+        session.set_leverage(category="linear", symbol=symbol, buyLeverage=str(LEVERAGE), sellLeverage=str(LEVERAGE))
+    except Exception:
+        pass
+    try:
+        session.switch_position_mode(category="linear", symbol=symbol, mode=3)
+    except Exception:
+        pass
+
+def manage_trailing_stop():
+    try:
+        positions = session.get_positions(category="linear", settleCoin="USDT")['result']['list']
         for pos in positions:
             size = float(pos['size'])
             if size > 0:
-                side = pos['side'] # Buy (Long) немесе Sell (Short)
-                avg_price = float(pos['avgPrice'])
-                mark_price = float(pos['markPrice'])
-                leverage = float(pos['leverage'])
-                # ROI есептеу (Лонг және Шорт үшін бөлек)
+                symbol = pos['symbol']
+                side = pos['side']
+                entry_price = float(pos['avgPrice'])
+                current_price = float(pos['markPrice'])
+                current_sl = float(pos['stopLoss']) if pos['stopLoss'] else 0.0
+
                 if side == "Buy":
-                    current_roi = ((mark_price - avg_price) / avg_price) * leverage * 100
-                    close_side = "Sell"
-                    pos_idx = 1
-                else:
-                    current_roi = ((avg_price - mark_price) / avg_price) * leverage * 100
-                    close_side = "Buy"
-                    pos_idx = 2
+                    profit_pct = (current_price - entry_price) / entry_price
+                    new_sl = round(entry_price * 1.001, 6) # +0.1% безубыток
+                    if profit_pct >= TRAILING_STOP_TRIGGER and (current_sl < new_sl or current_sl == 0):
+                        session.set_trading_stop(
+                            category="linear", symbol=symbol, positionIdx=1, stopLoss=str(new_sl)
+                        )
+                        print(f"🛡️ [{symbol}] BUY Трейлинг-Стоп (+0.2%) іске қосылды! Жаңа SL: {new_sl}")
 
-                print(f"📊 [{side}] Ағымдағы ROI: {round(current_roi, 2)}% (Мақсат: {TARGET_ROI_PCT}%)")
-
-                if current_roi >= TARGET_ROI_PCT:
-                    print(f"🎯 Пайда мақсаты орындалды! {side} позициясы жабылуда...")
-                    clear_orders()
-                    session.place_order(
-                        category=CATEGORY,
-                        symbol=SYMBOL,
-                        side=close_side,
-                        orderType="Market",
-                        qty=pos['size'],
-                        reduceOnly=True,
-                        positionIdx=pos_idx
-                    )
-                    print("✅ Пайда сәтті бекітілді! Бот 1 минут тынығып, жаңа сетка құрады.")
-                    time.sleep(60)
-                    return True
+                elif side == "Sell":
+                    profit_pct = (entry_price - current_price) / entry_price
+                    new_sl = round(entry_price * 0.999, 6) # +0.1% безубыток
+                    if profit_pct >= TRAILING_STOP_TRIGGER and (current_sl > new_sl or current_sl == 0):
+                        session.set_trading_stop(
+                            category="linear", symbol=symbol, positionIdx=2, stopLoss=str(new_sl)
+                        )
+                        print(f"🛡️ [{symbol}] SELL Трейлинг-Стоп (+0.2%) іске қосылды! Жаңа SL: {new_sl}")
     except Exception as e:
-        print(f"Take Profit қатесі: {e}")
-    return False
+        print(f"Трейлинг-стоп қателігі: {e}")
 
-def place_dynamic_grid(current_price, trend_is_bullish):
-    clear_orders()
-    half_grid = GRID_COUNT // 2
+def open_position(symbol, side, atr):
+    if get_active_positions_count() >= MAX_ACTIVE_POSITIONS:
+        print(f"⚠️ [{symbol}] Лимит толып тұр (Макс {MAX_ACTIVE_POSITIONS} ордер). Өткізіп жіберілді.")
+        return
 
-    if trend_is_bullish:
-        print(f"📈 Өсу тренді анықталды (Bullish). LONG сетка құрылуда | Баға: ${current_price}")
-        # Лонг сетка (Төмендеуге ордерлер Buy, жоғарыға Sell)
-        for i in range(1, half_grid + 1):
-            buy_price = round(current_price * (1 - (GRID_SPACING_PCT * i)), 4)
-            try:
-                session.place_order(category=CATEGORY, symbol=SYMBOL, side="Buy", orderType="Limit", price=str(buy_price), qty=str(QTY_PER_GRID), positionIdx=1, postOnly=True)
-            except Exception as e:
-                print(f"Buy қатесі: {e}")
-        for i in range(1, half_grid + 1):
-            sell_price = round(current_price * (1 + (GRID_SPACING_PCT * i)), 4)
-            try:
-                session.place_order(category=CATEGORY, symbol=SYMBOL, side="Sell", orderType="Limit", price=str(sell_price), qty=str(QTY_PER_GRID), positionIdx=2, postOnly=True)
-            except Exception as e:
-                print(f"Sell қатесі: {e}")
+    set_leverage_and_mode(symbol)
+    
+    ticker = session.get_tickers(category="linear", symbol=symbol)
+    price = float(ticker['result']['list'][0]['lastPrice'])
+    
+    qty = get_symbol_precision(symbol, price)
+    if qty <= 0:
+        return
+
+    pos_idx = 1 if side == "BUY" else 2
+    
+    sl_distance = atr * 1.0
+    tp_distance = atr * 1.0  # Тейк-Профит 1.0 * ATR
+
+    if side == "BUY":
+        sl_price = round(price - sl_distance, 6)
+        tp_price = round(price + tp_distance, 6)
     else:
-        print(f"📉 Құлау тренді анықталды (Bearish). SHORT сетка құрылуда | Баға: ${current_price}")
-        # Шорт сетка (Жоғарылауға ордерлер Sell, төменге Buy)
-        for i in range(1, half_grid + 1):
-            sell_price = round(current_price * (1 + (GRID_SPACING_PCT * i)), 4)
-            try:
-                session.place_order(category=CATEGORY, symbol=SYMBOL, side="Sell", orderType="Limit", price=str(sell_price), qty=str(QTY_PER_GRID), positionIdx=2, postOnly=True)
-            except Exception as e:
-                print(f"Sell қатесі: {e}")
-        for i in range(1, half_grid + 1):
-            buy_price = round(current_price * (1 - (GRID_SPACING_PCT * i)), 4)
-            try:
-                session.place_order(category=CATEGORY, symbol=SYMBOL, side="Buy", orderType="Limit", price=str(buy_price), qty=str(QTY_PER_GRID), positionIdx=1, postOnly=True)
-            except Exception as e:
-                print(f"Buy қатесі: {e}")
+        sl_price = round(price + sl_distance, 6)
+        tp_price = round(price - tp_distance, 6)
+
+    try:
+        session.place_order(
+            category="linear",
+            symbol=symbol,
+            side=side,
+            orderType="Market",
+            qty=str(qty),
+            positionIdx=pos_idx,
+            stopLoss=str(sl_price),
+            takeProfit=str(tp_price),
+            timeInForce="GTC"
+        )
+        print(f"🔥 [ОДЕР АШЫЛДЫ] [{symbol}] {side} | Qty: {qty} | SL: {sl_price} | TP: {tp_price}")
+    except Exception as e:
+        print(f"[{symbol}] Ордер ашу қатесі: {e}")
 
 def run_bot():
-    setup_market()
-    last_update = 0
-
+    print("🚀 Бот іске қосылды (10% Маржа + +0.2% Жылдам Трейлинг + TP 1.0*ATR)...")
     while True:
-        try:
-            if check_and_take_profit():
-                last_update = 0
-
-            price, rsi, ema20 = get_market_data()
-            trend_is_bullish = price >= ema20
-            print(f"[DYNAMIC DEMO] XRP/USDT: ${price} | EMA20: ${round(ema20, 4)} | RSI: {round(rsi, 2)}")
-
-            if 30 <= rsi <= 70:
-                if time.time() - last_update > 600:
-                    place_dynamic_grid(price, trend_is_bullish)
-                    last_update = time.time()
+        manage_trailing_stop()
+        
+        for symbol in SYMBOLS:
+            signal, atr = analyze_market(symbol)
+            if signal and atr:
+                open_position(symbol, side=signal, atr=atr)
             else:
-                print(f"⚠️ RSI шектен тыс деңгейде ({round(rsi, 2)}).")
-
-            time.sleep(15)
-        except Exception as e:
-            print(f"Қате: {e}")
-            time.sleep(10)
+                print(f"💤 [{symbol}] Сигнал жоқ...")
+        
+        time.sleep(150)
 
 if __name__ == "__main__":
     run_bot()
