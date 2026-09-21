@@ -18,18 +18,18 @@ logging.basicConfig(
 )
 
 # ==============================================================================
-# CONFIG / PARAMETERS (КҮНІНЕ 9-14 ОРДЕРГЕ БЕЙІМДЕЛГЕН)
+# CONFIG / PARAMETERS (КҮНІНЕ 9-14 ОРДЕР БЕЙІМДЕЛУІ)
 # ==============================================================================
 API_KEY = os.getenv("BYBIT_API_KEY", "")
 API_SECRET = os.getenv("BYBIT_API_SECRET", "")
 IS_DEMO = True
 
-# 8 өтімді монета (Сауда жиілігін арттырады)
+# 8 өтімді монета
 SYMBOLS = ["SOLUSDT", "XRPUSDT", "1000PEPEUSDT", "NEARUSDT", "AVAXUSDT", "ETHUSDT", "DOGEUSDT", "SUIUSDT"]
 
 LEVERAGE = 10
 RISK_PCT = 0.10             # 10% Маржа
-MAX_ACTIVE_POSITIONS = 3     # Бір уақытта макс 3 позиция
+MAX_ACTIVE_POSITIONS = 3     # Максимум 3 белсенді позиция
 
 USE_CLOSED_CANDLE = True     # Сигналдарды тек жабық шаммен (iloc[-2]) тексеру
 
@@ -47,10 +47,10 @@ EMA_SLOW = 50
 
 VWAP_ENABLED = True
 VOLUME_SMA_PERIOD = 20
-MIN_VOLUME_RATIO = 1.10      # 🔥 1.10x (Көлем сүзгісі сәл жұмсартылды)
+MIN_VOLUME_RATIO = 1.10
 
 BOS_ENABLED = True
-SWING_LOOKBACK = 4           # 🔥 Lookback 4-ке түсті (BOS жиірек анықталады)
+SWING_LOOKBACK = 4
 
 # Score Салмақтары (Жалпы = 100)
 WEIGHT_TREND = 20
@@ -60,7 +60,7 @@ WEIGHT_ADX_DI = 15
 WEIGHT_VOLUME = 10
 WEIGHT_BOS = 20
 
-ENTRY_SCORE = 60             # 🔥 Score 60-қа түсірілді (Күніне 9-14 ордер беруге мүмкіндік береді)
+ENTRY_SCORE = 60
 STRONG_SCORE = 80
 
 SL_ATR_MULT = 0.7
@@ -340,9 +340,13 @@ def get_symbol_precision(symbol: str, price: float) -> float:
     position_usd = margin_usd * LEVERAGE
     raw_qty = position_usd / price
 
-    if symbol in ["SOLUSDT", "AVAXUSDT", "NEARUSDT", "ETHUSDT", "LINKUSDT"]: return round(raw_qty, 2)
-    elif symbol in ["XRPUSDT", "DOGEUSDT", "SUIUSDT"]: return round(raw_qty, 1)
-    elif symbol == "1000PEPEUSDT": return int(raw_qty)
+    # 🛠️ МОНЕТАЛАРДЫҢ ЛОТ ҒАДАМЫ (PRECISION) ДҰРЫСТАЛДЫ
+    if symbol in ["SOLUSDT", "AVAXUSDT", "NEARUSDT", "ETHUSDT"]:
+        return round(raw_qty, 2)
+    elif symbol in ["XRPUSDT", "DOGEUSDT"]:
+        return round(round(raw_qty, 1))
+    elif symbol in ["1000PEPEUSDT", "SUIUSDT"]: # 🔥 SUIUSDT Бүтін сан (int) етіп қосылды
+        return int(raw_qty)
     return round(raw_qty, 2)
 
 def set_leverage_and_mode(symbol: str):
@@ -432,6 +436,8 @@ def open_position(symbol: str, side: str, atr: float, price: float):
         )
         if res.get('retCode') == 0:
             logging.info(f"🔥 [ОДЕР АШЫЛДЫ] [{symbol}] {side} | Qty: {qty} | SL: {sl_price} | TP: {tp_price}")
+        else:
+            logging.error(f"[{symbol}] Ордер ашу қатесі: {res}")
     except Exception as e:
         logging.error(f"[{symbol}] Ордер ашу қатесі: {e}")
 
