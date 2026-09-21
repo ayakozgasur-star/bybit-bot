@@ -64,7 +64,7 @@ STRONG_SCORE = 80
 SL_ATR_MULT = 0.7
 TP_ATR_MULT = 0.7
 
-# 🎯 DYNAMIC TRAILING & TIME EXIT БАПТАУЛАРЫ
+# Dynamic Trailing & Time Exit Баптаулары
 TRAILING_TRIGGER_PCT = 0.003  # +0.3% пайда болғанда Трейлинг іске қосылады
 TRAILING_DISTANCE_PCT = 0.0015 # Ағымдағы бағадан 0.15% артта жүреді
 MAX_FLAT_TIME_MIN = 45        # 45 мин бойы қозғалыс болмаса позиция жабылады
@@ -109,28 +109,30 @@ def calculate_macd(series: pd.Series, fast=12, slow=26, signal=9):
     return macd_line, signal_line, hist
 
 def calculate_vwap(df: pd.DataFrame) -> pd.Series:
-    tp = (df['high'] + df['low'] + df['close']) / 3.0
-    pv = tp * df['volume']
-    if 'time' in df.columns:
-        df['date'] = pd.to_datetime(df['time'], unit='ms').dt.date
-        cum_pv = df.groupby('date', group_keys=False).apply(lambda x: (x['high'] + x['low'] + x['close']) / 3.0 * x['volume'])
-        cum_vol = df.groupby('date')['volume'].cumsum()
-        return cum_pv.groupby(df['date']).cumsum() / (cum_vol + 1e-10)
-    return (pv.cumsum()) / (df['volume'].cumsum() + 1e-10)
+    """Түзетілген, Series қайтаратын VWAP функциясы"""
+    df_temp = df.copy()
+    tp = (df_temp['high'] + df_temp['low'] + df_temp['close']) / 3.0
+    pv = tp * df_temp['volume']
+    
+    dates = pd.to_datetime(df_temp['time'], unit='ms').dt.date
+    cum_pv = pv.groupby(dates).cumsum()
+    cum_vol = df_temp['volume'].groupby(dates).cumsum()
+    
+    return cum_pv / (cum_vol + 1e-10)
 
 def calculate_adx_di(df: pd.DataFrame, window: int = 14):
-    df = df.copy()
-    up_move = df['high'] - df['high'].shift(1)
-    down_move = df['low'].shift(1) - df['low']
+    df_temp = df.copy()
+    up_move = df_temp['high'] - df_temp['high'].shift(1)
+    down_move = df_temp['low'].shift(1) - df_temp['low']
     
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    tr = calculate_atr(df, window=1)
+    tr = calculate_atr(df_temp, window=1)
     tr_smooth = tr.rolling(window).sum()
     
-    plus_di = 100 * (pd.Series(plus_dm, index=df.index).rolling(window).sum() / (tr_smooth + 1e-10))
-    minus_di = 100 * (pd.Series(minus_dm, index=df.index).rolling(window).sum() / (tr_smooth + 1e-10))
+    plus_di = 100 * (pd.Series(plus_dm, index=df_temp.index).rolling(window).sum() / (tr_smooth + 1e-10))
+    minus_di = 100 * (pd.Series(minus_dm, index=df_temp.index).rolling(window).sum() / (tr_smooth + 1e-10))
     
     dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10))
     adx = dx.rolling(window).mean()
@@ -141,15 +143,15 @@ def calculate_volume_ratio(df: pd.DataFrame, period: int = 20) -> pd.Series:
     return df['volume'] / (vol_sma + 1e-10)
 
 def calculate_bos_and_structure(df: pd.DataFrame, lookback: int = 5):
-    df = df.copy()
-    df['swing_high'] = df['high'].shift(1).rolling(window=lookback).max()
-    df['swing_low'] = df['low'].shift(1).rolling(window=lookback).min()
+    df_temp = df.copy()
+    df_temp['swing_high'] = df_temp['high'].shift(1).rolling(window=lookback).max()
+    df_temp['swing_low'] = df_temp['low'].shift(1).rolling(window=lookback).min()
     
-    bullish_bos = df['close'] > df['swing_high']
-    bearish_bos = df['close'] < df['swing_low']
+    bullish_bos = df_temp['close'] > df_temp['swing_high']
+    bearish_bos = df_temp['close'] < df_temp['swing_low']
     
-    hh_hl = (df['high'] > df['high'].shift(lookback)) & (df['low'] > df['low'].shift(lookback))
-    lh_ll = (df['high'] < df['high'].shift(lookback)) & (df['low'] < df['low'].shift(lookback))
+    hh_hl = (df_temp['high'] > df_temp['high'].shift(lookback)) & (df_temp['low'] > df_temp['low'].shift(lookback))
+    lh_ll = (df_temp['high'] < df_temp['high'].shift(lookback)) & (df_temp['low'] < df_temp['low'].shift(lookback))
     return bullish_bos, bearish_bos, hh_hl, lh_ll
 
 # ==============================================================================
@@ -362,7 +364,6 @@ def set_leverage_and_mode(symbol: str):
     except Exception: pass
 
 def manage_advanced_trailing_and_exit():
-    """🔥 Жаңартылған Dynamic Trailing және Time Exit логикасы"""
     try:
         positions = get_active_positions()
         for pos in positions:
@@ -374,12 +375,11 @@ def manage_advanced_trailing_and_exit():
             entry_price = float(pos['avgPrice'])
             current_price = float(pos['markPrice'])
             current_sl = float(pos['stopLoss']) if pos['stopLoss'] else 0.0
-            updated_time = int(pos['updatedTime']) / 1000.0  # Секундпен
+            updated_time = int(pos['updatedTime']) / 1000.0
 
-            # 1. DYNAMIC TRAILING STOP (Баға соңынан 0.15% артта ілесіп отырады)
             if side == "Buy":
                 profit_pct = (current_price - entry_price) / entry_price
-                if profit_pct >= TRAILING_TRIGGER_PCT:  # +0.3% пайда болғанда
+                if profit_pct >= TRAILING_TRIGGER_PCT:
                     new_sl = round(current_price * (1.0 - TRAILING_DISTANCE_PCT), 6)
                     if new_sl > current_sl:
                         session.set_trading_stop(category="linear", symbol=symbol, positionIdx=1, stopLoss=str(new_sl))
@@ -387,13 +387,12 @@ def manage_advanced_trailing_and_exit():
 
             elif side == "Sell":
                 profit_pct = (entry_price - current_price) / entry_price
-                if profit_pct >= TRAILING_TRIGGER_PCT:  # +0.3% пайда болғанда
+                if profit_pct >= TRAILING_TRIGGER_PCT:
                     new_sl = round(current_price * (1.0 + TRAILING_DISTANCE_PCT), 6)
                     if current_sl == 0 or new_sl < current_sl:
                         session.set_trading_stop(category="linear", symbol=symbol, positionIdx=2, stopLoss=str(new_sl))
                         logging.info(f"🛡️ [{symbol}] SELL Dynamic Trailing SL: {new_sl}")
 
-            # 2. TIME-BASED EXIT (45 минут бойы флэт болса жабу)
             time_in_trade_min = (time.time() - updated_time) / 60.0
             price_change_pct = abs((current_price - entry_price) / entry_price)
 
@@ -453,7 +452,6 @@ def run_bot():
     logging.info("🚀 Бот іске қосылды Multi-Factor + Dynamic Trailing...")
     while True:
         try:
-            # Трейлинг және уақыт бойынша шығуды тексеру
             manage_advanced_trailing_and_exit()
 
             for symbol in SYMBOLS:
