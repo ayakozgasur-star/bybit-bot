@@ -18,16 +18,18 @@ logging.basicConfig(
 )
 
 # ==============================================================================
-# CONFIG / PARAMETERS
+# CONFIG / PARAMETERS (КҮНІНЕ 9-14 ОРДЕРГЕ БЕЙІМДЕЛГЕН)
 # ==============================================================================
 API_KEY = os.getenv("BYBIT_API_KEY", "")
 API_SECRET = os.getenv("BYBIT_API_SECRET", "")
 IS_DEMO = True
 
-SYMBOLS = ["SOLUSDT", "XRPUSDT", "1000PEPEUSDT", "NEARUSDT", "AVAXUSDT"]
+# 8 өтімді монета (Сауда жиілігін арттырады)
+SYMBOLS = ["SOLUSDT", "XRPUSDT", "1000PEPEUSDT", "NEARUSDT", "AVAXUSDT", "ETHUSDT", "DOGEUSDT", "SUIUSDT"]
+
 LEVERAGE = 10
 RISK_PCT = 0.10             # 10% Маржа
-MAX_ACTIVE_POSITIONS = 2     # Максимум 2 белсенді позиция
+MAX_ACTIVE_POSITIONS = 3     # Бір уақытта макс 3 позиция
 
 USE_CLOSED_CANDLE = True     # Сигналдарды тек жабық шаммен (iloc[-2]) тексеру
 
@@ -45,10 +47,10 @@ EMA_SLOW = 50
 
 VWAP_ENABLED = True
 VOLUME_SMA_PERIOD = 20
-MIN_VOLUME_RATIO = 1.20
+MIN_VOLUME_RATIO = 1.10      # 🔥 1.10x (Көлем сүзгісі сәл жұмсартылды)
 
 BOS_ENABLED = True
-SWING_LOOKBACK = 5
+SWING_LOOKBACK = 4           # 🔥 Lookback 4-ке түсті (BOS жиірек анықталады)
 
 # Score Салмақтары (Жалпы = 100)
 WEIGHT_TREND = 20
@@ -58,7 +60,7 @@ WEIGHT_ADX_DI = 15
 WEIGHT_VOLUME = 10
 WEIGHT_BOS = 20
 
-ENTRY_SCORE = 70
+ENTRY_SCORE = 60             # 🔥 Score 60-қа түсірілді (Күніне 9-14 ордер беруге мүмкіндік береді)
 STRONG_SCORE = 80
 
 SL_ATR_MULT = 0.7
@@ -109,31 +111,24 @@ def calculate_macd(series: pd.Series, fast=12, slow=26, signal=9):
     return macd_line, signal_line, hist
 
 def calculate_vwap(df: pd.DataFrame) -> pd.Series:
-    """Түзетілген, Series қайтаратын VWAP функциясы"""
     df_temp = df.copy()
     tp = (df_temp['high'] + df_temp['low'] + df_temp['close']) / 3.0
     pv = tp * df_temp['volume']
-    
     dates = pd.to_datetime(df_temp['time'], unit='ms').dt.date
     cum_pv = pv.groupby(dates).cumsum()
     cum_vol = df_temp['volume'].groupby(dates).cumsum()
-    
     return cum_pv / (cum_vol + 1e-10)
 
 def calculate_adx_di(df: pd.DataFrame, window: int = 14):
     df_temp = df.copy()
     up_move = df_temp['high'] - df_temp['high'].shift(1)
     down_move = df_temp['low'].shift(1) - df_temp['low']
-    
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
     tr = calculate_atr(df_temp, window=1)
     tr_smooth = tr.rolling(window).sum()
-    
     plus_di = 100 * (pd.Series(plus_dm, index=df_temp.index).rolling(window).sum() / (tr_smooth + 1e-10))
     minus_di = 100 * (pd.Series(minus_dm, index=df_temp.index).rolling(window).sum() / (tr_smooth + 1e-10))
-    
     dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10))
     adx = dx.rolling(window).mean()
     return adx, plus_di, minus_di
@@ -142,14 +137,12 @@ def calculate_volume_ratio(df: pd.DataFrame, period: int = 20) -> pd.Series:
     vol_sma = df['volume'].rolling(period).mean()
     return df['volume'] / (vol_sma + 1e-10)
 
-def calculate_bos_and_structure(df: pd.DataFrame, lookback: int = 5):
+def calculate_bos_and_structure(df: pd.DataFrame, lookback: int = 4):
     df_temp = df.copy()
     df_temp['swing_high'] = df_temp['high'].shift(1).rolling(window=lookback).max()
     df_temp['swing_low'] = df_temp['low'].shift(1).rolling(window=lookback).min()
-    
     bullish_bos = df_temp['close'] > df_temp['swing_high']
     bearish_bos = df_temp['close'] < df_temp['swing_low']
-    
     hh_hl = (df_temp['high'] > df_temp['high'].shift(lookback)) & (df_temp['low'] > df_temp['low'].shift(lookback))
     lh_ll = (df_temp['high'] < df_temp['high'].shift(lookback)) & (df_temp['low'] < df_temp['low'].shift(lookback))
     return bullish_bos, bearish_bos, hh_hl, lh_ll
@@ -160,8 +153,7 @@ def calculate_bos_and_structure(df: pd.DataFrame, lookback: int = 5):
 def fetch_klines(symbol: str, interval: str, limit: int = 200) -> pd.DataFrame:
     try:
         res = session.get_kline(category="linear", symbol=symbol, interval=interval, limit=limit)
-        if res.get('retCode') != 0:
-            return None
+        if res.get('retCode') != 0: return None
         df = pd.DataFrame(res['result']['list'], columns=['time', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
         df = df.iloc[::-1].reset_index(drop=True)
         df['time'] = df['time'].astype(int)
@@ -178,8 +170,7 @@ def get_account_balance() -> float:
         if res.get('retCode') == 0:
             return float(res['result']['list'][0]['totalEquity'])
         return 1000.0
-    except Exception:
-        return 1000.0
+    except Exception: return 1000.0
 
 def get_active_positions():
     try:
@@ -187,8 +178,7 @@ def get_active_positions():
         if res.get('retCode') == 0:
             return [pos for pos in res['result']['list'] if float(pos['size']) > 0]
         return []
-    except Exception:
-        return []
+    except Exception: return []
 
 # ==============================================================================
 # SCORE CALCULATORS
@@ -205,8 +195,8 @@ def calculate_trend_score(c_5m, c_15m, c_1h) -> tuple:
 
 def calculate_momentum_score(c_5m, prev_5m) -> tuple:
     l_score, s_score = 0, 0
-    if 52 <= c_5m['rsi'] <= 70: l_score += 10
-    elif 30 <= c_5m['rsi'] <= 48: s_score += 10
+    if 50 <= c_5m['rsi'] <= 70: l_score += 10
+    elif 30 <= c_5m['rsi'] <= 50: s_score += 10
     if c_5m['macd_hist'] > 0 and c_5m['macd_hist'] > prev_5m['macd_hist']: l_score += 10
     elif c_5m['macd_hist'] < 0 and c_5m['macd_hist'] < prev_5m['macd_hist']: s_score += 10
     return l_score, s_score
@@ -350,8 +340,8 @@ def get_symbol_precision(symbol: str, price: float) -> float:
     position_usd = margin_usd * LEVERAGE
     raw_qty = position_usd / price
 
-    if symbol in ["SOLUSDT", "AVAXUSDT", "NEARUSDT"]: return round(raw_qty, 1)
-    elif symbol == "XRPUSDT": return round(raw_qty, 0)
+    if symbol in ["SOLUSDT", "AVAXUSDT", "NEARUSDT", "ETHUSDT", "LINKUSDT"]: return round(raw_qty, 2)
+    elif symbol in ["XRPUSDT", "DOGEUSDT", "SUIUSDT"]: return round(raw_qty, 1)
     elif symbol == "1000PEPEUSDT": return int(raw_qty)
     return round(raw_qty, 2)
 
@@ -449,7 +439,7 @@ def open_position(symbol: str, side: str, atr: float, price: float):
 # MAIN BOT LOOP
 # ==============================================================================
 def run_bot():
-    logging.info("🚀 Бот іске қосылды Multi-Factor + Dynamic Trailing...")
+    logging.info("🚀 Бот іске қосылды (Күніне 9-14 ордер режимі)...")
     while True:
         try:
             manage_advanced_trailing_and_exit()
