@@ -2,27 +2,26 @@ import os
 import time
 from datetime import datetime
 import pandas as pd
-import pandas_ta as ta
+import numpy as np
 from pybit.unified_trading import HTTP
 
 # ==============================================================================
-# CONFIG / PARAMETERS (5-САТЫЛЫ МИНУСТЫ ЖАБУ РЕЖИМІ)
+# CONFIG / PARAMETERS (1000 USDT ДЕПОЗИТКЕ АРНАЛҒАН 5-САТЫЛЫ DCA РЕЖИМІ)
 # ==============================================================================
 API_KEY = os.getenv("BYBIT_API_KEY", "")
 API_SECRET = os.getenv("BYBIT_API_SECRET", "")
-IS_DEMO = True
+IS_DEMO = True  # Реалды саудаға көшу үшін False деп өзгертіңіз
 
 # 8 волатильді монета
 SYMBOLS = ["SOLUSDT", "XRPUSDT", "1000PEPEUSDT", "NEARUSDT", "AVAXUSDT", "ETHUSDT", "DOGEUSDT", "SUIUSDT"]
 
 LEVERAGE = 10
 BASE_ORDER_USDT = 10.0         # 1-ордер (10 USDT)
-MAX_ACTIVE_POSITIONS = 3       # 5 сатыда рискі жоғары болғандықтан, макс 3 монета
+MAX_ACTIVE_POSITIONS = 3       # Бір уақытта ең көп дегенде 3 актив
 
-# 5-САТЫЛЫ DCA/САТЫЛЫ ОРТАШАЛАУ СХЕМАСЫ
-MAX_DCA_STEPS = 5              # Максимум 5 саты
+# 5-САТЫЛЫ DCA / МАРТИНГЕЙЛ ОРТАШАЛАУ СХЕМАСЫ
+MAX_DCA_STEPS = 5
 
-# Минус деңгейлері және келесі ордерлердің көлемі:
 DCA_CONFIG = {
     2: {"trigger_loss_usdt": 10.0,  "order_usdt": 20.0},  # -10$ минуста 20$ қосады
     3: {"trigger_loss_usdt": 25.0,  "order_usdt": 30.0},  # -25$ минуста 30$ қосады
@@ -34,7 +33,7 @@ HARD_STOP_LOSS_USDT = 160.0     # 5-сатыдан кейін де минус -$
 
 USE_CLOSED_CANDLE = True
 
-# Индикаторлар
+# Индикатор параметрлері
 ADX_PERIOD = 14
 ADX_MIN = 20
 
@@ -83,7 +82,54 @@ def log(msg):
     print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} [INFO] {msg}", flush=True)
 
 # ==============================================================================
-# HELPER FUNCTIONS (PRECISION / STEP SIZE)
+# PURE PYTHON / PANDAS INDICATORS (PANDAS_TA-СЫЗ ТАЗА ЕСЕПТЕУ)
+# ==============================================================================
+def calc_ema(series, length):
+    return series.ewm(span=length, adjust=False).mean()
+
+def calc_rsi(series, length=14):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=length).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=length).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+def calc_macd(series, fast=12, slow=26, signal=9):
+    ema_fast = calc_ema(series, fast)
+    ema_slow = calc_ema(series, slow)
+    macd = ema_fast - ema_slow
+    macd_signal = calc_ema(macd, signal)
+    return macd, macd_signal
+
+def calc_adx(df, length=14):
+    df = df.copy()
+    df['up'] = df['high'] - df['high'].shift(1)
+    df['down'] = df['low'].shift(1) - df['low']
+    
+    df['plus_dm'] = np.where((df['up'] > df['down']) & (df['up'] > 0), df['up'], 0.0)
+    df['minus_dm'] = np.where((df['down'] > df['up']) & (df['down'] > 0), df['down'], 0.0)
+    
+    df['tr0'] = df['high'] - df['low']
+    df['tr1'] = abs(df['high'] - df['close'].shift(1))
+    df['tr2'] = abs(df['low'] - df['close'].shift(1))
+    df['tr'] = df[['tr0', 'tr1', 'tr2']].max(axis=1)
+    
+    tr_smooth = df['tr'].ewm(alpha=1/length, adjust=False).mean()
+    plus_di = 100 * (df['plus_dm'].ewm(alpha=1/length, adjust=False).mean() / tr_smooth)
+    minus_di = 100 * (df['minus_dm'].ewm(alpha=1/length, adjust=False).mean() / tr_smooth)
+    
+    dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di))
+    adx = dx.ewm(alpha=1/length, adjust=False).mean()
+    
+    return adx, plus_di, minus_di
+
+def calc_vwap(df):
+    tp = (df['high'] + df['low'] + df['close']) / 3
+    vwap = (tp * df['volume']).cumsum() / df['volume'].cumsum()
+    return vwap
+
+# ==============================================================================
+# HELPER FUNCTIONS
 # ==============================================================================
 def get_symbol_info(symbol):
     try:
@@ -125,11 +171,6 @@ def get_klines(symbol, interval, limit=100):
         log(f"Кэндл алу қатесі ({symbol} {interval}): {e}")
         return None
 
-def calculate_vwap(df):
-    tp = (df['high'] + df['low'] + df['close']) / 3
-    vwap = (tp * df['volume']).cumsum() / df['volume'].cumsum()
-    return vwap
-
 def get_market_analysis(symbol):
     df_1h = get_klines(symbol, "60", limit=100)
     df_15m = get_klines(symbol, "15", limit=100)
@@ -138,28 +179,22 @@ def get_market_analysis(symbol):
     if df_1h is None or df_15m is None or df_5m is None or len(df_5m) < 50:
         return None
 
-    df_1h['ema_fast'] = ta.ema(df_1h['close'], length=EMA_FAST)
-    df_1h['ema_slow'] = ta.ema(df_1h['close'], length=EMA_SLOW)
+    df_1h['ema_fast'] = calc_ema(df_1h['close'], EMA_FAST)
+    df_1h['ema_slow'] = calc_ema(df_1h['close'], EMA_SLOW)
     trend_1h = 'BULLISH' if df_1h['ema_fast'].iloc[-1] > df_1h['ema_slow'].iloc[-1] else 'BEARISH'
 
-    df_15m['ema_fast'] = ta.ema(df_15m['close'], length=EMA_FAST)
-    df_15m['ema_slow'] = ta.ema(df_15m['close'], length=EMA_SLOW)
+    df_15m['ema_fast'] = calc_ema(df_15m['close'], EMA_FAST)
+    df_15m['ema_slow'] = calc_ema(df_15m['close'], EMA_SLOW)
     trend_15m = 'BULLISH' if df_15m['ema_fast'].iloc[-1] > df_15m['ema_slow'].iloc[-1] else 'BEARISH'
 
     idx = -2 if USE_CLOSED_CANDLE else -1
     
-    df_5m['rsi'] = ta.rsi(df_5m['close'], length=RSI_PERIOD)
-    macd = ta.macd(df_5m['close'], fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL)
-    df_5m['macd'] = macd['MACD_12_26_9']
-    df_5m['macd_sig'] = macd['MACDs_12_26_9']
-    
-    adx_df = ta.adx(df_5m['high'], df_5m['low'], df_5m['close'], length=ADX_PERIOD)
-    df_5m['adx'] = adx_df[f'ADX_{ADX_PERIOD}']
-    df_5m['dipi'] = adx_df[f'DMP_{ADX_PERIOD}']
-    df_5m['dimi'] = adx_df[f'DMN_{ADX_PERIOD}']
+    df_5m['rsi'] = calc_rsi(df_5m['close'], RSI_PERIOD)
+    df_5m['macd'], df_5m['macd_sig'] = calc_macd(df_5m['close'], MACD_FAST, MACD_SLOW, MACD_SIGNAL)
+    df_5m['adx'], df_5m['dipi'], df_5m['dimi'] = calc_adx(df_5m, ADX_PERIOD)
 
-    df_5m['vwap'] = calculate_vwap(df_5m)
-    df_5m['vol_sma'] = ta.sma(df_5m['volume'], length=VOLUME_SMA_PERIOD)
+    df_5m['vwap'] = calc_vwap(df_5m)
+    df_5m['vol_sma'] = df_5m['volume'].rolling(VOLUME_SMA_PERIOD).mean()
 
     df_5m['swing_high'] = df_5m['high'].shift(1).rolling(SWING_LOOKBACK).max()
     df_5m['swing_low'] = df_5m['low'].shift(1).rolling(SWING_LOOKBACK).min()
@@ -192,8 +227,8 @@ def get_market_analysis(symbol):
 def get_btc_trend():
     df = get_klines("BTCUSDT", "15", limit=50)
     if df is None: return "NEUTRAL"
-    df['ema_fast'] = ta.ema(df['close'], length=EMA_FAST)
-    df['ema_slow'] = ta.ema(df['close'], length=EMA_SLOW)
+    df['ema_fast'] = calc_ema(df['close'], EMA_FAST)
+    df['ema_slow'] = calc_ema(df['close'], EMA_SLOW)
     if df['ema_fast'].iloc[-1] > df['ema_slow'].iloc[-1]: return "BULLISH"
     elif df['ema_fast'].iloc[-1] < df['ema_slow'].iloc[-1]: return "BEARISH"
     return "NEUTRAL"
@@ -321,7 +356,7 @@ def manage_positions():
         _, price_tick = get_symbol_info(symbol)
         current_step = dca_tracker.get(symbol, 1)
 
-        # 1. 5-САТЫЛЫ DCA ЛОГИКАСЫ (Кезекті сатыны қосу)
+        # 1. 5-САТЫЛЫ DCA ЛОГИКАСЫ
         next_step = current_step + 1
         if next_step in DCA_CONFIG:
             cfg = DCA_CONFIG[next_step]
@@ -329,13 +364,13 @@ def manage_positions():
                 log(f"⚠️ [{symbol}] Минус -${abs(unrealised_pnl):.2f}-ге жетті. {next_step}-саты DCA (${cfg['order_usdt']}) іске қосылуда...")
                 place_order(symbol, side, current_price, usdt_amount=cfg["order_usdt"], is_dca=True, dca_step=next_step)
 
-        # 2. EMERGENCY HARD STOP-LOSS (5-сатыдан кейінгі қауіпсіздік)
+        # 2. EMERGENCY HARD STOP-LOSS
         if unrealised_pnl <= -HARD_STOP_LOSS_USDT:
             close_side = "Sell" if side == "Buy" else "Buy"
             session.place_order(category="linear", symbol=symbol, side=close_side, orderType="Market", qty=qty, reduceOnly=True)
             log(f"🚨 HARD STOP-LOSS (-${HARD_STOP_LOSS_USDT}): {symbol} позициясы жабылды.")
 
-        # 3. DYNAMIC TRAILING STOP (Орташа бағадан бастап пайданы ұстау)
+        # 3. DYNAMIC TRAILING STOP
         pnl_pct = ((current_price - entry_price) / entry_price) if side == "Buy" else ((entry_price - current_price) / entry_price)
         
         if pnl_pct >= TRAILING_TRIGGER_PCT:
@@ -348,7 +383,7 @@ def manage_positions():
                 session.set_trading_stop(category="linear", symbol=symbol, stopLoss=formatted_new_sl, slTriggerBy="LastPrice")
                 log(f"🎯 Трейлинг-Стоп жаңартылды [{symbol}]: {formatted_new_sl}")
 
-        # 4. TIME EXIT (45 минут флэт болса жабу)
+        # 4. TIME EXIT
         if symbol in position_entry_times:
             duration_min = (time.time() - position_entry_times[symbol]) / 60
             if duration_min >= MAX_FLAT_TIME_MIN:
