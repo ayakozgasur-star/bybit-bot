@@ -82,7 +82,7 @@ def log(msg):
     print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} [INFO] {msg}", flush=True)
 
 # ==============================================================================
-# PURE PYTHON / PANDAS INDICATORS (PANDAS_TA-СЫЗ ТАЗА ЕСЕПТЕУ)
+# PURE PYTHON / PANDAS INDICATORS (ПАКЕТТЕРГЕ ТӘУЕЛСІЗ ТАЗА ЕСЕПТЕУ)
 # ==============================================================================
 def calc_ema(series, length):
     return series.ewm(span=length, adjust=False).mean()
