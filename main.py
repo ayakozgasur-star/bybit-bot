@@ -28,7 +28,7 @@ session = HTTP(
     demo=IS_DEMO
 )
 
-current_step = 1              # Бастапқы саты (1$)
+current_step = 1              # Бастапқы саты ($1)
 initial_balance = 0.0
 
 def log(msg):
@@ -129,7 +129,6 @@ def open_new_step_order():
     if not symbol or signal == "NO TRADE":
         return False
 
-    # Кепілдік маржа көлемі: 1-саты = $1, 2-саты = $2, ..., 100-саты = $100
     usdt_amount = float(current_step)
 
     df = get_klines(symbol, "5", limit=5)
@@ -141,7 +140,6 @@ def open_new_step_order():
 
     set_leverage(symbol)
     
-    # Позицияның жалпы көлемі = Маржа * Плечо (20x)
     position_size_usdt = usdt_amount * LEVERAGE
     raw_qty = position_size_usdt / close_price
     formatted_qty = format_value(raw_qty, qty_step)
@@ -150,13 +148,21 @@ def open_new_step_order():
 
     order_side = "Buy" if signal == "LONG" else "Sell"
 
+    # positionIdx=0 One-Way Mode үшін қосылды (ErrCode: 10001 шешімі)
     res = session.place_order(
-        category="linear", symbol=symbol, side=order_side, orderType="Market", qty=formatted_qty
+        category="linear",
+        symbol=symbol,
+        side=order_side,
+        orderType="Market",
+        qty=formatted_qty,
+        positionIdx=0
     )
     
     if res['retCode'] == 0:
         log(f"🚀 [{current_step}-САТЫ ОРДЕР] {symbol} {signal} | Маржа: ${usdt_amount} USDT | Бағасы: {close_price}")
         return True
+    else:
+        log(f"Ордер ашу қатесі: {res['retMsg']} (Code: {res['retCode']})")
     return False
 
 def manage_single_position():
@@ -164,7 +170,6 @@ def manage_single_position():
     
     positions = get_active_positions()
     
-    # 1. Егер ашық позиция болмаса -> Жаңа ордер ашамыз
     if len(positions) == 0:
         open_new_step_order()
         return
@@ -175,37 +180,53 @@ def manage_single_position():
     qty = pos['size']
     unrealised_pnl = float(pos.get('unrealisedPnl', 0))
 
-    # 20x Плечода:
-    # Тейк-Профит (TP 0.8% баға өзгерісі) = +16% маржа пайдасы (current_step * 0.16)
-    # Стоп-Лосс (SL 0.3% баға өзгерісі) = -6% маржа шығыны (current_step * 0.06)
+    # 20x Плечомен:
+    # TP 0.8% баға өзгерісі = +16% маржа пайдасы
+    # SL 0.3% баға өзгерісі = -6% маржа шығыны
     take_profit_usdt = float(current_step) * 0.16
     stop_loss_usdt = float(current_step) * 0.06
 
-    # 2. МИНУС БОЛСА -> Жауып, келесі сатыға ($1 -> $2 -> $3 -> ... $100) өту
+    # 1. МИНУС БОЛСА -> Жауып, келесі сатыға өту ($1 -> $2 -> $3 ... $100)
     if unrealised_pnl <= -stop_loss_usdt:
         close_side = "Sell" if side == "Buy" else "Buy"
-        session.place_order(category="linear", symbol=symbol, side=close_side, orderType="Market", qty=qty, reduceOnly=True)
-        log(f"❌ [{current_step}-САТЫ МИНУС] {symbol} -${abs(unrealised_pnl):.2f} тіркелді (SL соғылды). Ордер жабылды!")
+        session.place_order(
+            category="linear",
+            symbol=symbol,
+            side=close_side,
+            orderType="Market",
+            qty=qty,
+            reduceOnly=True,
+            positionIdx=0
+        )
+        log(f"❌ [{current_step}-САТЫ МИНУС] {symbol} -${abs(unrealised_pnl):.2f} тіркелді (SL соғылды). Жабылды!")
         
         current_step += 1
         if current_step > MAX_STEP:
             log(f"⚠️ {MAX_STEP}-сатыға жетті. Қайтадан 1-сатыдан ($1) бастайды.")
             current_step = 1
 
-    # 3. ПЛЮС БОЛСА -> Жауып, ҚАЙТАДАН 1-САТЫҒА ($1) ОРАЛУ
+    # 2. ПЛЮС БОЛСА -> Жауып, ҚАЙТАДАН 1-САТЫҒА ($1) ОРАЛУ
     elif unrealised_pnl >= take_profit_usdt:
         close_side = "Sell" if side == "Buy" else "Buy"
-        session.place_order(category="linear", symbol=symbol, side=close_side, orderType="Market", qty=qty, reduceOnly=True)
-        log(f"💰 [{current_step}-САТЫ ПАЙДА] {symbol} +${unrealised_pnl:.2f} пайдамен жабылды (TP соғылды)! Қайтадан 1-сатыға ($1) оралу.")
+        session.place_order(
+            category="linear",
+            symbol=symbol,
+            side=close_side,
+            orderType="Market",
+            qty=qty,
+            reduceOnly=True,
+            positionIdx=0
+        )
+        log(f"💰 [{current_step}-САТЫ ПАЙДА] {symbol} +${unrealised_pnl:.2f} пайдамен жабылды! Қайтадан 1-сатыға ($1) оралу.")
         
-        current_step = 1  # Плюс тіркелген бойда 1$-ге қайтады
+        current_step = 1
 
 # ==============================================================================
 # MAIN LOOP
 # ==============================================================================
 def main():
     global initial_balance
-    log("🚀 Бот іске қосылды (20x Плечо | TP: 0.8% | SL: 0.3% | Сатылар: $1 -> $100 -> Плюсте қайта $1)")
+    log("🚀 Бот іске қосылды (20x Плечо | TP: 0.8% | SL: 0.3% | Сатылар: $1 -> $100)")
     
     initial_balance = get_wallet_balance()
     log(f"💵 Бастапқы Баланс: {initial_balance:.2f} USDT | Мақсат: +{TARGET_TOTAL_PROFIT} USDT пайда табу")
@@ -215,7 +236,6 @@ def main():
             current_balance = get_wallet_balance()
             total_profit = current_balance - initial_balance
 
-            # Жалпы таза пайда +100 USDT болғанда сауданы тоқтатады
             if total_profit >= TARGET_TOTAL_PROFIT:
                 log(f"🎉 МАҚСАТ ОРЫНДАЛДЫ! Жалпы таза пайда: +{total_profit:.2f} USDT. Бот сауданы аяқтады.")
                 break
