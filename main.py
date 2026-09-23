@@ -12,11 +12,40 @@ API_KEY = os.getenv("BYBIT_API_KEY", "")
 API_SECRET = os.getenv("BYBIT_API_SECRET", "")
 IS_DEMO = True  # Реал сауда үшін False орнатыңыз
 
-SYMBOLS = ["SOLUSDT", "XRPUSDT", "1000PEPEUSDT", "NEARUSDT", "AVAXUSDT", "ETHUSDT", "DOGEUSDT", "SUIUSDT"]
+SYMBOLS = [
+    "SOLUSDT", "XRPUSDT", "1000PEPEUSDT", "NEARUSDT", "AVAXUSDT", 
+    "ETHUSDT", "DOGEUSDT", "SUIUSDT", "BTCUSDT", "ADAUSDT", 
+    "BNBUSDT", "LTCUSDT", "LINKUSDT", "DOTUSDT", "APTUSDT"
+]
 
 LEVERAGE = 20                 # Плечо: 20x
 TARGET_TOTAL_PROFIT = 100.0   # Жалпы мақсатты таза пайда: +100 USDT
-MAX_STEP = 100                # Максималды саты ($100-ге дейін)
+MAX_OPEN_POSITIONS = 3        # БІР УАҚЫТТА АШЫЛАТЫН МАКСИМАЛДЫ ПОЗИЦИЯ САНЫ
+
+# TP / SL Проценттері (Баға қозғалысы бойынша)
+TP_PCT = 0.005  # +0.5% (20x плечомен маржаға +10% пайда)
+SL_PCT = 0.003  # -0.3% (20x плечомен маржаға -6% шығын)
+
+# ==============================================================================
+# DYNAMIC MARTINGALE STEPS (1-ден 100-ге дейін)
+# ==============================================================================
+def generate_martingale_steps(max_steps=100):
+    """
+    1-ордер: $1, 2-ордер: $4, 3-ордер: $7
+    4-ордер: $11, 5-ордер: $14, 6-ордер: $17
+    7-ордер: $21, 8-ордер: $24, 9-ордер: $27 ...
+    """
+    steps = []
+    current = 1
+    for i in range(1, max_steps + 1):
+        steps.append(current)
+        if i % 3 == 0:
+            current += 4  # Әр 3-ші сатыдан кейін +4
+        else:
+            current += 3  # Әдеттегі өсім +3
+    return steps
+
+MARTINGALE_STEPS = generate_martingale_steps(100)
 
 # ==============================================================================
 # INITIALIZATION & GLOBALS
@@ -28,7 +57,7 @@ session = HTTP(
     demo=IS_DEMO
 )
 
-current_step = 1              # Бастапқы саты ($1)
+current_step_idx = 0          # Саты индексі (0-ден басталады = $1)
 initial_balance = 0.0
 
 def log(msg):
@@ -70,8 +99,11 @@ def get_klines(symbol, interval, limit=50):
     except:
         return None
 
-def get_best_signal():
+def get_best_signal(active_symbols):
     for symbol in SYMBOLS:
+        if symbol in active_symbols:
+            continue
+            
         df = get_klines(symbol, "5", limit=50)
         if df is None or len(df) < 20: continue
         
@@ -118,138 +150,129 @@ def get_symbol_info(symbol):
         if res['retCode'] == 0:
             info = res['result']['list'][0]
             qty_step = float(info['lotSizeFilter']['qtyStep'])
-            return qty_step
+            price_step = float(info['priceFilter']['tickSize'])
+            return qty_step, price_step
     except: pass
-    return None
+    return None, None
 
-def open_new_step_order():
-    global current_step
+def open_new_step_order(active_symbols):
+    global current_step_idx
     
-    symbol, signal = get_best_signal()
+    symbol, signal = get_best_signal(active_symbols)
     if not symbol or signal == "NO TRADE":
-        log(f"🔍 [САТЫ {current_step}] Жұптар тексерілді: Сигнал жоқ. Ордер ізделуде...")
+        log(f"🔍 [АШЫҚ ПОЗИЦИЯЛАР: {len(active_symbols)}/{MAX_OPEN_POSITIONS}] Сигнал ізделуде...")
         return False
 
-    usdt_amount = float(current_step)
+    # Ағымдағы сатының маржа сомасы ($1, $4, $7, $11, ...)
+    usdt_margin = MARTINGALE_STEPS[current_step_idx]
 
     df = get_klines(symbol, "5", limit=5)
     if df is None: return False
     close_price = df['close'].iloc[-1]
     
-    qty_step = get_symbol_info(symbol)
-    if not qty_step: return False
+    qty_step, price_step = get_symbol_info(symbol)
+    if not qty_step or not price_step: return False
 
     set_leverage(symbol)
     
-    position_size_usdt = usdt_amount * LEVERAGE
+    position_size_usdt = usdt_margin * LEVERAGE
     raw_qty = position_size_usdt / close_price
     formatted_qty = format_value(raw_qty, qty_step)
 
     if float(formatted_qty) <= 0: return False
 
-    # Hedge Mode: LONG = 1, SHORT = 2
+    # Native TP/SL & Limit Price
     if signal == "LONG":
         order_side = "Buy"
         pos_idx = 1
+        limit_price = close_price
+        tp_price = close_price * (1 + TP_PCT)
+        sl_price = close_price * (1 - SL_PCT)
     else:
         order_side = "Sell"
         pos_idx = 2
+        limit_price = close_price
+        tp_price = close_price * (1 - TP_PCT)
+        sl_price = close_price * (1 + SL_PCT)
 
+    formatted_limit = format_value(limit_price, price_step)
+    formatted_tp = format_value(tp_price, price_step)
+    formatted_sl = format_value(sl_price, price_step)
+
+    # LIMIT (MAKER) ОРДЕР АШУ
     res = session.place_order(
         category="linear",
         symbol=symbol,
         side=order_side,
-        orderType="Market",
+        orderType="Limit",
+        price=formatted_limit,
         qty=formatted_qty,
+        takeProfit=formatted_tp,
+        stopLoss=formatted_sl,
         positionIdx=pos_idx
     )
     
     if res['retCode'] == 0:
-        log(f"🚀 [{current_step}-САТЫ ОРДЕР] {symbol} {signal} | Маржа: ${usdt_amount} USDT | Бағасы: {close_price}")
+        log(f"⚡ [САТЫ #{current_step_idx + 1} | МАРЖА: ${usdt_margin} USDT] {symbol} {signal} | Бағасы: {formatted_limit} | TP: {formatted_tp} | SL: {formatted_sl}")
         return True
     else:
-        log(f"Ордер ашу қатесі: {res['retMsg']} (Code: {res['retCode']})")
+        log(f"Ордер ашу қатесі ({symbol}): {res['retMsg']} (Code: {res['retCode']})")
     return False
 
-def manage_single_position():
-    global current_step
+def manage_multi_positions():
+    global current_step_idx
     
     positions = get_active_positions()
-    
-    if len(positions) == 0:
-        open_new_step_order()
-        return
+    active_symbols = [p['symbol'] for p in positions]
 
-    pos = positions[0]
-    symbol = pos['symbol']
-    side = pos['side']
-    qty = pos['size']
-    pos_idx = int(pos.get('positionIdx', 1 if side == "Buy" else 2))
-    unrealised_pnl = float(pos.get('unrealisedPnl', 0))
+    if len(positions) < MAX_OPEN_POSITIONS:
+        open_new_step_order(active_symbols)
 
-    log(f"📊 [ПОЗИЦИЯ АШЫҚ] {symbol} {side} | Шамасы: {qty} | Ағымдағы PnL: {unrealised_pnl:.2f} USDT")
-
-    take_profit_usdt = float(current_step) * 0.16
-    stop_loss_usdt = float(current_step) * 0.06
-
-    if unrealised_pnl <= -stop_loss_usdt:
-        close_side = "Sell" if side == "Buy" else "Buy"
-        session.place_order(
-            category="linear",
-            symbol=symbol,
-            side=close_side,
-            orderType="Market",
-            qty=qty,
-            reduceOnly=True,
-            positionIdx=pos_idx
-        )
-        log(f"❌ [{current_step}-САТЫ МИНУС] {symbol} -${abs(unrealised_pnl):.2f} тіркелді (SL соғылды). Жабылды!")
-        
-        current_step += 1
-        if current_step > MAX_STEP:
-            log(f"⚠️ {MAX_STEP}-сатыға жетті. Қайтадан 1-сатыдан ($1) бастайды.")
-            current_step = 1
-
-    elif unrealised_pnl >= take_profit_usdt:
-        close_side = "Sell" if side == "Buy" else "Buy"
-        session.place_order(
-            category="linear",
-            symbol=symbol,
-            side=close_side,
-            orderType="Market",
-            qty=qty,
-            reduceOnly=True,
-            positionIdx=pos_idx
-        )
-        log(f"💰 [{current_step}-САТЫ ПАЙДА] {symbol} +${unrealised_pnl:.2f} пайдамен жабылды! Қайтадан 1-сатыға ($1) оралу.")
-        
-        current_step = 1
+    for pos in positions:
+        symbol = pos['symbol']
+        side = pos['side']
+        unrealised_pnl = float(pos.get('unrealisedPnl', 0))
+        log(f"📊 [ПОЗИЦИЯ] {symbol} {side} | PnL: {unrealised_pnl:.2f} USDT | Саты маржасы: ${MARTINGALE_STEPS[current_step_idx]} USDT")
 
 # ==============================================================================
 # MAIN LOOP
 # ==============================================================================
 def main():
-    global initial_balance
-    log("🚀 Бот іске қосылды (20x Плечо | TP: 0.8% | SL: 0.3% | Hedge Mode бапталды)")
+    global initial_balance, current_step_idx
+    log(f"🚀 Бот іске қосылды (Арнайы Мартингейл Кестесі: $1, $4, $7, $11... | Limit/Maker Режим)")
     
     initial_balance = get_wallet_balance()
-    log(f"💵 Бастапқы Баланс: {initial_balance:.2f} USDT | Мақсат: +{TARGET_TOTAL_PROFIT} USDT пайда табу")
+    last_balance = initial_balance
+    log(f"💵 Бастапқы Баланс: {initial_balance:.2f} USDT | Мақсат: +{TARGET_TOTAL_PROFIT} USDT")
 
     while True:
         try:
             current_balance = get_wallet_balance()
             total_profit = current_balance - initial_balance
 
+            # Пайданы тексеру
             if total_profit >= TARGET_TOTAL_PROFIT:
-                log(f"🎉 МАҚСАТ ОРЫНДАЛДЫ! Жалпы таза пайда: +{total_profit:.2f} USDT. Бот сауданы аяқтады.")
+                log(f"🎉 МАҚСАТ ОРЫНДАЛДЫ! Жалпы таза пайда: +{total_profit:.2f} USDT.")
                 break
 
-            manage_single_position()
-            time.sleep(10)
+            # Баланс өзгерісін бақылау
+            balance_change = current_balance - last_balance
+            if balance_change > 0.05:
+                log(f"✅ ТЕЙК-ПРОФИТ СОҒЫЛДЫ (+{balance_change:.2f} USDT)! Барлық минустар жабылды. 1-сатыға ($1) қайтамыз.")
+                current_step_idx = 0  # 1-сатыға ($1) оралу
+                last_balance = current_balance
+            elif balance_change < -0.05:
+                log(f"❌ СТОП-ЛОСС СОҒЫЛДЫ ({balance_change:.2f} USDT). Келесі сатыға өтеміз.")
+                current_step_idx = min(current_step_idx + 1, len(MARTINGALE_STEPS) - 1)
+                log(f"➡️ Жаңа саты: #{current_step_idx + 1} (Маржа: ${MARTINGALE_STEPS[current_step_idx]} USDT)")
+                last_balance = current_balance
+
+            manage_multi_positions()
+            time.sleep(3)
 
         except Exception as e:
             log(f"Қате: {e}")
-            time.sleep(10)
+            time.sleep(3)
 
 if __name__ == "__main__":
     main()
