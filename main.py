@@ -146,7 +146,7 @@ def open_new_step_order():
 
     if float(formatted_qty) <= 0: return False
 
-    # Hedge Mode үшін positionIdx орнату: LONG = 1, SHORT = 2
+    # Hedge Mode режимі үшін positionIdx: LONG = 1, SHORT = 2
     if signal == "LONG":
         order_side = "Buy"
         pos_idx = 1
@@ -183,9 +183,12 @@ def manage_single_position():
     symbol = pos['symbol']
     side = pos['side']
     qty = pos['size']
-    pos_idx = int(pos.get('positionIdx', 0))
+    pos_idx = int(pos.get('positionIdx', 1 if side == "Buy" else 2))
     unrealised_pnl = float(pos.get('unrealisedPnl', 0))
 
+    # 20x Плечомен:
+    # TP 0.8% баға өзгерісі = +16% маржа пайдасы
+    # SL 0.3% баға өзгерісі = -6% маржа шығыны
     take_profit_usdt = float(current_step) * 0.16
     stop_loss_usdt = float(current_step) * 0.06
 
@@ -229,7 +232,7 @@ def manage_single_position():
 # ==============================================================================
 def main():
     global initial_balance
-    log("🚀 Бот іске қосылды (20x Плечо | TP: 0.8% | SL: 0.3% | Hedge Mode / positionIdx орнатылды)")
+    log("🚀 Бот іске қосылды (20x Плечо | TP: 0.8% | SL: 0.3% | Hedge Mode бапталды)")
     
     initial_balance = get_wallet_balance()
     log(f"💵 Бастапқы Баланс: {initial_balance:.2f} USDT | Мақсат: +{TARGET_TOTAL_PROFIT} USDT пайда табу")
