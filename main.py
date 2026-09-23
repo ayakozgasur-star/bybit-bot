@@ -6,66 +6,20 @@ import numpy as np
 from pybit.unified_trading import HTTP
 
 # ==============================================================================
-# CONFIG / PARAMETERS (1000 USDT ДЕПОЗИТКЕ АРНАЛҒАН 5-САТЫЛЫ DCA РЕЖИМІ)
+# CONFIG / PARAMETERS
 # ==============================================================================
 API_KEY = os.getenv("BYBIT_API_KEY", "")
 API_SECRET = os.getenv("BYBIT_API_SECRET", "")
-IS_DEMO = True  # Реалды саудаға көшу үшін False деп өзгертіңіз
+IS_DEMO = True  # Реал сауда үшін False орнатыңыз
 
-# 8 волатильді монета
 SYMBOLS = ["SOLUSDT", "XRPUSDT", "1000PEPEUSDT", "NEARUSDT", "AVAXUSDT", "ETHUSDT", "DOGEUSDT", "SUIUSDT"]
 
-LEVERAGE = 10
-BASE_ORDER_USDT = 10.0         # 1-ордер (10 USDT)
-MAX_ACTIVE_POSITIONS = 3       # Бір уақытта ең көп дегенде 3 актив
-
-# 5-САТЫЛЫ DCA / МАРТИНГЕЙЛ ОРТАШАЛАУ СХЕМАСЫ
-MAX_DCA_STEPS = 5
-
-DCA_CONFIG = {
-    2: {"trigger_loss_usdt": 10.0,  "order_usdt": 20.0},  # -10$ минуста 20$ қосады
-    3: {"trigger_loss_usdt": 25.0,  "order_usdt": 30.0},  # -25$ минуста 30$ қосады
-    4: {"trigger_loss_usdt": 50.0,  "order_usdt": 50.0},  # -50$ минуста 50$ қосады
-    5: {"trigger_loss_usdt": 90.0,  "order_usdt": 80.0},  # -90$ минуста 80$ қосады
-}
-
-HARD_STOP_LOSS_USDT = 160.0     # 5-сатыдан кейін де минус -$160 болса, позицияны жабу
-
-USE_CLOSED_CANDLE = True
-
-# Индикатор параметрлері
-ADX_PERIOD = 14
-ADX_MIN = 20
-
-RSI_PERIOD = 14
-MACD_FAST = 12
-MACD_SLOW = 26
-MACD_SIGNAL = 9
-
-EMA_FAST = 20
-EMA_SLOW = 50
-
-VOLUME_SMA_PERIOD = 20
-MIN_VOLUME_RATIO = 1.05
-SWING_LOOKBACK = 4
-
-# Score Салмақтары
-WEIGHT_TREND = 20
-WEIGHT_MOMENTUM = 20
-WEIGHT_VWAP = 15
-WEIGHT_ADX_DI = 15
-WEIGHT_VOLUME = 10
-WEIGHT_BOS = 20
-
-ENTRY_SCORE = 55
-
-# Dynamic Trailing & Time Exit
-TRAILING_TRIGGER_PCT = 0.003   # Орташа бағадан +0.3% оңға өткенде Трейлинг қосылады
-TRAILING_DISTANCE_PCT = 0.0015 # 0.15% қашықтық
-MAX_FLAT_TIME_MIN = 45         # Флэттегі саудаларды 45 минутта жабу
+LEVERAGE = 20                 # Плечо: 20x
+TARGET_TOTAL_PROFIT = 100.0   # Жалпы мақсатты таза пайда: +100 USDT
+MAX_STEP = 100                # Максималды саты ($100-ге дейін)
 
 # ==============================================================================
-# INITIALIZATION
+# INITIALIZATION & GLOBALS
 # ==============================================================================
 session = HTTP(
     testnet=False,
@@ -74,15 +28,24 @@ session = HTTP(
     demo=IS_DEMO
 )
 
-processed_candles = {}
-position_entry_times = {}
-dca_tracker = {}
+current_step = 1              # Бастапқы саты (1$)
+initial_balance = 0.0
 
 def log(msg):
     print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} [INFO] {msg}", flush=True)
 
+def get_wallet_balance():
+    try:
+        res = session.get_wallet_balance(accountType="UNIFIED", coin="USDT")
+        if res['retCode'] == 0:
+            coin_info = res['result']['list'][0]['coin'][0]
+            return float(coin_info['walletBalance'])
+    except Exception as e:
+        log(f"Баланс алу қатесі: {e}")
+    return 0.0
+
 # ==============================================================================
-# PURE PYTHON / PANDAS INDICATORS (ПАКЕТТЕРГЕ ТӘУЕЛСІЗ ТАЗА ЕСЕПТЕУ)
+# INDICATORS & SIGNALS
 # ==============================================================================
 def calc_ema(series, length):
     return series.ewm(span=length, adjust=False).mean()
@@ -94,183 +57,35 @@ def calc_rsi(series, length=14):
     rs = gain / loss
     return 100 - (100 / (1 + rs))
 
-def calc_macd(series, fast=12, slow=26, signal=9):
-    ema_fast = calc_ema(series, fast)
-    ema_slow = calc_ema(series, slow)
-    macd = ema_fast - ema_slow
-    macd_signal = calc_ema(macd, signal)
-    return macd, macd_signal
-
-def calc_adx(df, length=14):
-    df = df.copy()
-    df['up'] = df['high'] - df['high'].shift(1)
-    df['down'] = df['low'].shift(1) - df['low']
-    
-    df['plus_dm'] = np.where((df['up'] > df['down']) & (df['up'] > 0), df['up'], 0.0)
-    df['minus_dm'] = np.where((df['down'] > df['up']) & (df['down'] > 0), df['down'], 0.0)
-    
-    df['tr0'] = df['high'] - df['low']
-    df['tr1'] = abs(df['high'] - df['close'].shift(1))
-    df['tr2'] = abs(df['low'] - df['close'].shift(1))
-    df['tr'] = df[['tr0', 'tr1', 'tr2']].max(axis=1)
-    
-    tr_smooth = df['tr'].ewm(alpha=1/length, adjust=False).mean()
-    plus_di = 100 * (df['plus_dm'].ewm(alpha=1/length, adjust=False).mean() / tr_smooth)
-    minus_di = 100 * (df['minus_dm'].ewm(alpha=1/length, adjust=False).mean() / tr_smooth)
-    
-    dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di))
-    adx = dx.ewm(alpha=1/length, adjust=False).mean()
-    
-    return adx, plus_di, minus_di
-
-def calc_vwap(df):
-    tp = (df['high'] + df['low'] + df['close']) / 3
-    vwap = (tp * df['volume']).cumsum() / df['volume'].cumsum()
-    return vwap
-
-# ==============================================================================
-# HELPER FUNCTIONS
-# ==============================================================================
-def get_symbol_info(symbol):
-    try:
-        res = session.get_instruments_info(category="linear", symbol=symbol)
-        if res['retCode'] == 0:
-            info = res['result']['list'][0]
-            qty_step = float(info['lotSizeFilter']['qtyStep'])
-            price_tick = float(info['priceFilter']['tickSize'])
-            return qty_step, price_tick
-    except Exception as e:
-        log(f"Символ ақпаратын алу қатесі ({symbol}): {e}")
-    return None, None
-
-def format_value(value, step):
-    if step is None or step == 0:
-        return str(value)
-    precision = 0
-    step_str = f"{step:.8f}".rstrip('0')
-    if '.' in step_str:
-        precision = len(step_str.split('.')[1])
-    return f"{round(value, precision):.{precision}f}"
-
-# ==============================================================================
-# MARKET DATA FUNCTIONS
-# ==============================================================================
-def get_klines(symbol, interval, limit=100):
+def get_klines(symbol, interval, limit=50):
     try:
         res = session.get_kline(category="linear", symbol=symbol, interval=interval, limit=limit)
-        if res['retCode'] != 0:
-            return None
+        if res['retCode'] != 0: return None
         list_data = res['result']['list']
         df = pd.DataFrame(list_data, columns=['start_time', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
         df['start_time'] = pd.to_datetime(pd.to_numeric(df['start_time']), unit='ms')
         for col in ['open', 'high', 'low', 'close', 'volume']:
             df[col] = df[col].astype(float)
-        df = df.sort_values('start_time').reset_index(drop=True)
-        return df
-    except Exception as e:
-        log(f"Кэндл алу қатесі ({symbol} {interval}): {e}")
+        return df.sort_values('start_time').reset_index(drop=True)
+    except:
         return None
 
-def get_market_analysis(symbol):
-    df_1h = get_klines(symbol, "60", limit=100)
-    df_15m = get_klines(symbol, "15", limit=100)
-    df_5m = get_klines(symbol, "5", limit=100)
-
-    if df_1h is None or df_15m is None or df_5m is None or len(df_5m) < 50:
-        return None
-
-    df_1h['ema_fast'] = calc_ema(df_1h['close'], EMA_FAST)
-    df_1h['ema_slow'] = calc_ema(df_1h['close'], EMA_SLOW)
-    trend_1h = 'BULLISH' if df_1h['ema_fast'].iloc[-1] > df_1h['ema_slow'].iloc[-1] else 'BEARISH'
-
-    df_15m['ema_fast'] = calc_ema(df_15m['close'], EMA_FAST)
-    df_15m['ema_slow'] = calc_ema(df_15m['close'], EMA_SLOW)
-    trend_15m = 'BULLISH' if df_15m['ema_fast'].iloc[-1] > df_15m['ema_slow'].iloc[-1] else 'BEARISH'
-
-    idx = -2 if USE_CLOSED_CANDLE else -1
-    
-    df_5m['rsi'] = calc_rsi(df_5m['close'], RSI_PERIOD)
-    df_5m['macd'], df_5m['macd_sig'] = calc_macd(df_5m['close'], MACD_FAST, MACD_SLOW, MACD_SIGNAL)
-    df_5m['adx'], df_5m['dipi'], df_5m['dimi'] = calc_adx(df_5m, ADX_PERIOD)
-
-    df_5m['vwap'] = calc_vwap(df_5m)
-    df_5m['vol_sma'] = df_5m['volume'].rolling(VOLUME_SMA_PERIOD).mean()
-
-    df_5m['swing_high'] = df_5m['high'].shift(1).rolling(SWING_LOOKBACK).max()
-    df_5m['swing_low'] = df_5m['low'].shift(1).rolling(SWING_LOOKBACK).min()
-
-    curr = df_5m.iloc[idx]
-    
-    bos = "NONE"
-    if curr['close'] > curr['swing_high']:
-        bos = "BULLISH_BOS"
-    elif curr['close'] < curr['swing_low']:
-        bos = "BEARISH_BOS"
-
-    return {
-        'symbol': symbol,
-        'candle_time': df_5m['start_time'].iloc[idx],
-        'close': curr['close'],
-        'trend_1h': trend_1h,
-        'trend_15m': trend_15m,
-        'rsi': curr['rsi'],
-        'macd': curr['macd'],
-        'macd_sig': curr['macd_sig'],
-        'adx': curr['adx'],
-        'dipi': curr['dipi'],
-        'dimi': curr['dimi'],
-        'vwap': curr['vwap'],
-        'vol_ratio': curr['volume'] / curr['vol_sma'] if curr['vol_sma'] > 0 else 1.0,
-        'bos': bos
-    }
-
-def get_btc_trend():
-    df = get_klines("BTCUSDT", "15", limit=50)
-    if df is None: return "NEUTRAL"
-    df['ema_fast'] = calc_ema(df['close'], EMA_FAST)
-    df['ema_slow'] = calc_ema(df['close'], EMA_SLOW)
-    if df['ema_fast'].iloc[-1] > df['ema_slow'].iloc[-1]: return "BULLISH"
-    elif df['ema_fast'].iloc[-1] < df['ema_slow'].iloc[-1]: return "BEARISH"
-    return "NEUTRAL"
-
-# ==============================================================================
-# SCORE CALCULATOR
-# ==============================================================================
-def calculate_scores(data, btc_trend):
-    long_score = 0
-    short_score = 0
-
-    if data['trend_1h'] == 'BULLISH' and data['trend_15m'] == 'BULLISH': long_score += WEIGHT_TREND
-    if data['trend_1h'] == 'BEARISH' and data['trend_15m'] == 'BEARISH': short_score += WEIGHT_TREND
-
-    if data['rsi'] > 50 and data['macd'] > data['macd_sig']: long_score += WEIGHT_MOMENTUM
-    if data['rsi'] < 50 and data['macd'] < data['macd_sig']: short_score += WEIGHT_MOMENTUM
-
-    if data['close'] > data['vwap']: long_score += WEIGHT_VWAP
-    if data['close'] < data['vwap']: short_score += WEIGHT_VWAP
-
-    if data['adx'] >= ADX_MIN:
-        if data['dipi'] > data['dimi']: long_score += WEIGHT_ADX_DI
-        elif data['dimi'] > data['dipi']: short_score += WEIGHT_ADX_DI
-
-    if data['vol_ratio'] >= MIN_VOLUME_RATIO:
-        long_score += WEIGHT_VOLUME
-        short_score += WEIGHT_VOLUME
-
-    if data['bos'] == 'BULLISH_BOS': long_score += WEIGHT_BOS
-    if data['bos'] == 'BEARISH_BOS': short_score += WEIGHT_BOS
-
-    reasons = []
-    if data['adx'] < ADX_MIN: reasons.append(f"ADX төмен ({data['adx']:.1f})")
-    if data['bos'] == "NONE": reasons.append("BOS жоқ")
-    
-    signal = "NO TRADE"
-    if long_score >= ENTRY_SCORE and data['adx'] >= ADX_MIN and data['bos'] == 'BULLISH_BOS' and btc_trend != "BEARISH":
-        signal = "LONG"
-    elif short_score >= ENTRY_SCORE and data['adx'] >= ADX_MIN and data['bos'] == 'BEARISH_BOS' and btc_trend != "BULLISH":
-        signal = "SHORT"
-
-    return long_score, short_score, signal, ", ".join(reasons) if reasons else "Сүзгілерден өтті"
+def get_best_signal():
+    for symbol in SYMBOLS:
+        df = get_klines(symbol, "5", limit=50)
+        if df is None or len(df) < 20: continue
+        
+        df['ema_fast'] = calc_ema(df['close'], 10)
+        df['ema_slow'] = calc_ema(df['close'], 30)
+        df['rsi'] = calc_rsi(df['close'], 14)
+        
+        last = df.iloc[-2]
+        if last['ema_fast'] > last['ema_slow'] and last['rsi'] > 50:
+            return symbol, "LONG"
+        elif last['ema_fast'] < last['ema_slow'] and last['rsi'] < 50:
+            return symbol, "SHORT"
+            
+    return None, "NO TRADE"
 
 # ==============================================================================
 # TRADE EXECUTION & MANAGEMENT
@@ -279,8 +94,7 @@ def get_active_positions():
     try:
         res = session.get_positions(category="linear", settleCoin="USDT")
         if res['retCode'] == 0:
-            positions = [p for p in res['result']['list'] if float(p['size']) > 0]
-            return positions
+            return [p for p in res['result']['list'] if float(p['size']) > 0]
     except Exception as e:
         log(f"Позицияларды алу қатесі: {e}")
     return []
@@ -291,150 +105,127 @@ def set_leverage(symbol):
     except:
         pass
 
-def place_order(symbol, side, close_price, usdt_amount, is_dca=False, dca_step=1):
+def format_value(value, step):
+    if step is None or step == 0: return str(value)
+    precision = 0
+    step_str = f"{step:.8f}".rstrip('0')
+    if '.' in step_str: precision = len(step_str.split('.')[1])
+    return f"{round(value, precision):.{precision}f}"
+
+def get_symbol_info(symbol):
     try:
-        qty_step, _ = get_symbol_info(symbol)
-        if not qty_step:
-            log(f"⚠️ {symbol} үшін лот ақпараты алынбады.")
-            return False
-
-        set_leverage(symbol)
-        
-        position_size_usdt = usdt_amount * LEVERAGE
-        raw_qty = position_size_usdt / close_price
-        formatted_qty = format_value(raw_qty, qty_step)
-        
-        if float(formatted_qty) <= 0:
-            log(f"⚠️ Ордер көлемі тым аз: {formatted_qty}")
-            return False
-
-        order_side = "Buy" if side in ["LONG", "Buy"] else "Sell"
-
-        res = session.place_order(
-            category="linear",
-            symbol=symbol,
-            side=order_side,
-            orderType="Market",
-            qty=formatted_qty
-        )
-        
+        res = session.get_instruments_info(category="linear", symbol=symbol)
         if res['retCode'] == 0:
-            if not is_dca:
-                log(f"🚀 [1-САТЫ] БАСТАПҚЫ ОРДЕР АШЫЛДЫ: {symbol} {side} | Көлемі: {formatted_qty} ({usdt_amount}$) | Бағасы: {close_price}")
-                position_entry_times[symbol] = time.time()
-                dca_tracker[symbol] = 1
-            else:
-                log(f"🔄 [{dca_step}-САТЫ DCA] ҚОСЫМША ОРДЕР АШЫЛДЫ: {symbol} {side} | Көлемі: {formatted_qty} ({usdt_amount}$) | Бағасы: {close_price}")
-                dca_tracker[symbol] = dca_step
-            return True
-        else:
-            log(f"❌ Ордер қатесі ({symbol}): {res['retMsg']}")
-            return False
-            
-    except Exception as e:
-        log(f"Ордер ашуда қате ({symbol}): {e}")
+            info = res['result']['list'][0]
+            qty_step = float(info['lotSizeFilter']['qtyStep'])
+            return qty_step
+    except: pass
+    return None
+
+def open_new_step_order():
+    global current_step
+    
+    symbol, signal = get_best_signal()
+    if not symbol or signal == "NO TRADE":
         return False
 
-def manage_positions():
+    # Кепілдік маржа көлемі: 1-саты = $1, 2-саты = $2, ..., 100-саты = $100
+    usdt_amount = float(current_step)
+
+    df = get_klines(symbol, "5", limit=5)
+    if df is None: return False
+    close_price = df['close'].iloc[-1]
+    
+    qty_step = get_symbol_info(symbol)
+    if not qty_step: return False
+
+    set_leverage(symbol)
+    
+    # Позицияның жалпы көлемі = Маржа * Плечо (20x)
+    position_size_usdt = usdt_amount * LEVERAGE
+    raw_qty = position_size_usdt / close_price
+    formatted_qty = format_value(raw_qty, qty_step)
+
+    if float(formatted_qty) <= 0: return False
+
+    order_side = "Buy" if signal == "LONG" else "Sell"
+
+    res = session.place_order(
+        category="linear", symbol=symbol, side=order_side, orderType="Market", qty=formatted_qty
+    )
+    
+    if res['retCode'] == 0:
+        log(f"🚀 [{current_step}-САТЫ ОРДЕР] {symbol} {signal} | Маржа: ${usdt_amount} USDT | Бағасы: {close_price}")
+        return True
+    return False
+
+def manage_single_position():
+    global current_step
+    
     positions = get_active_positions()
-    active_symbols = [p['symbol'] for p in positions]
+    
+    # 1. Егер ашық позиция болмаса -> Жаңа ордер ашамыз
+    if len(positions) == 0:
+        open_new_step_order()
+        return
 
-    for sym in list(dca_tracker.keys()):
-        if sym not in active_symbols:
-            del dca_tracker[sym]
-            if sym in position_entry_times:
-                del position_entry_times[sym]
+    pos = positions[0]
+    symbol = pos['symbol']
+    side = pos['side']
+    qty = pos['size']
+    unrealised_pnl = float(pos.get('unrealisedPnl', 0))
 
-    for pos in positions:
-        symbol = pos['symbol']
-        side = pos['side']
-        entry_price = float(pos['avgPrice'])
-        current_price = float(pos['markPrice'])
-        qty = pos['size']
-        unrealised_pnl = float(pos.get('unrealisedPnl', 0))
+    # 20x Плечода:
+    # Тейк-Профит (TP 0.8% баға өзгерісі) = +16% маржа пайдасы (current_step * 0.16)
+    # Стоп-Лосс (SL 0.3% баға өзгерісі) = -6% маржа шығыны (current_step * 0.06)
+    take_profit_usdt = float(current_step) * 0.16
+    stop_loss_usdt = float(current_step) * 0.06
+
+    # 2. МИНУС БОЛСА -> Жауып, келесі сатыға ($1 -> $2 -> $3 -> ... $100) өту
+    if unrealised_pnl <= -stop_loss_usdt:
+        close_side = "Sell" if side == "Buy" else "Buy"
+        session.place_order(category="linear", symbol=symbol, side=close_side, orderType="Market", qty=qty, reduceOnly=True)
+        log(f"❌ [{current_step}-САТЫ МИНУС] {symbol} -${abs(unrealised_pnl):.2f} тіркелді (SL соғылды). Ордер жабылды!")
         
-        _, price_tick = get_symbol_info(symbol)
-        current_step = dca_tracker.get(symbol, 1)
+        current_step += 1
+        if current_step > MAX_STEP:
+            log(f"⚠️ {MAX_STEP}-сатыға жетті. Қайтадан 1-сатыдан ($1) бастайды.")
+            current_step = 1
 
-        # 1. 5-САТЫЛЫ DCA ЛОГИКАСЫ
-        next_step = current_step + 1
-        if next_step in DCA_CONFIG:
-            cfg = DCA_CONFIG[next_step]
-            if unrealised_pnl <= -cfg["trigger_loss_usdt"]:
-                log(f"⚠️ [{symbol}] Минус -${abs(unrealised_pnl):.2f}-ге жетті. {next_step}-саты DCA (${cfg['order_usdt']}) іске қосылуда...")
-                place_order(symbol, side, current_price, usdt_amount=cfg["order_usdt"], is_dca=True, dca_step=next_step)
-
-        # 2. EMERGENCY HARD STOP-LOSS
-        if unrealised_pnl <= -HARD_STOP_LOSS_USDT:
-            close_side = "Sell" if side == "Buy" else "Buy"
-            session.place_order(category="linear", symbol=symbol, side=close_side, orderType="Market", qty=qty, reduceOnly=True)
-            log(f"🚨 HARD STOP-LOSS (-${HARD_STOP_LOSS_USDT}): {symbol} позициясы жабылды.")
-
-        # 3. DYNAMIC TRAILING STOP
-        pnl_pct = ((current_price - entry_price) / entry_price) if side == "Buy" else ((entry_price - current_price) / entry_price)
+    # 3. ПЛЮС БОЛСА -> Жауып, ҚАЙТАДАН 1-САТЫҒА ($1) ОРАЛУ
+    elif unrealised_pnl >= take_profit_usdt:
+        close_side = "Sell" if side == "Buy" else "Buy"
+        session.place_order(category="linear", symbol=symbol, side=close_side, orderType="Market", qty=qty, reduceOnly=True)
+        log(f"💰 [{current_step}-САТЫ ПАЙДА] {symbol} +${unrealised_pnl:.2f} пайдамен жабылды (TP соғылды)! Қайтадан 1-сатыға ($1) оралу.")
         
-        if pnl_pct >= TRAILING_TRIGGER_PCT:
-            new_sl = current_price * (1 - TRAILING_DISTANCE_PCT) if side == "Buy" else current_price * (1 + TRAILING_DISTANCE_PCT)
-            curr_sl = float(pos.get('stopLoss', 0) or 0)
-            
-            should_update = (side == "Buy" and new_sl > curr_sl) or (side == "Sell" and (curr_sl == 0 or new_sl < curr_sl))
-            if should_update and price_tick:
-                formatted_new_sl = format_value(new_sl, price_tick)
-                session.set_trading_stop(category="linear", symbol=symbol, stopLoss=formatted_new_sl, slTriggerBy="LastPrice")
-                log(f"🎯 Трейлинг-Стоп жаңартылды [{symbol}]: {formatted_new_sl}")
-
-        # 4. TIME EXIT
-        if symbol in position_entry_times:
-            duration_min = (time.time() - position_entry_times[symbol]) / 60
-            if duration_min >= MAX_FLAT_TIME_MIN:
-                close_side = "Sell" if side == "Buy" else "Buy"
-                session.place_order(category="linear", symbol=symbol, side=close_side, orderType="Market", qty=qty, reduceOnly=True)
-                log(f"⏱️ Time Exit ({MAX_FLAT_TIME_MIN} мин толды): {symbol} позициясы жабылды.")
+        current_step = 1  # Плюс тіркелген бойда 1$-ге қайтады
 
 # ==============================================================================
 # MAIN LOOP
 # ==============================================================================
 def main():
-    log("🚀 5-Сатылы DCA Скальпинг Бот іске қосылды...")
+    global initial_balance
+    log("🚀 Бот іске қосылды (20x Плечо | TP: 0.8% | SL: 0.3% | Сатылар: $1 -> $100 -> Плюсте қайта $1)")
     
+    initial_balance = get_wallet_balance()
+    log(f"💵 Бастапқы Баланс: {initial_balance:.2f} USDT | Мақсат: +{TARGET_TOTAL_PROFIT} USDT пайда табу")
+
     while True:
         try:
-            active_positions = get_active_positions()
-            active_count = len(active_positions)
-            btc_trend = get_btc_trend()
+            current_balance = get_wallet_balance()
+            total_profit = current_balance - initial_balance
 
-            manage_positions()
+            # Жалпы таза пайда +100 USDT болғанда сауданы тоқтатады
+            if total_profit >= TARGET_TOTAL_PROFIT:
+                log(f"🎉 МАҚСАТ ОРЫНДАЛДЫ! Жалпы таза пайда: +{total_profit:.2f} USDT. Бот сауданы аяқтады.")
+                break
 
-            for symbol in SYMBOLS:
-                data = get_market_analysis(symbol)
-                if data is None: continue
-
-                if processed_candles.get(symbol) == data['candle_time']:
-                    continue
-
-                long_score, short_score, signal, reasons = calculate_scores(data, btc_trend)
-
-                log(f"--- [ {symbol} | {data['candle_time']} ] ---")
-                log(f"1H: {data['trend_1h']} | 15M: {data['trend_15m']} | BTC: {btc_trend}")
-                log(f"ADX: {data['adx']:.1f} | Vol: {data['vol_ratio']:.2f}x | BOS: {data['bos']}")
-                log(f"LONG SCORE: {long_score}/100 | SHORT SCORE: {short_score}/100")
-                log(f"SIGNAL: {signal} | REASONS: {reasons}")
-
-                if signal != "NO TRADE":
-                    if active_count < MAX_ACTIVE_POSITIONS:
-                        if not any(p['symbol'] == symbol for p in active_positions):
-                            placed = place_order(symbol, signal, data['close'], usdt_amount=BASE_ORDER_USDT)
-                            if placed:
-                                processed_candles[symbol] = data['candle_time']
-                                active_count += 1
-                    else:
-                        log(f"⚠️ Белсенді ордерлер лимиті толды ({MAX_ACTIVE_POSITIONS}/{MAX_ACTIVE_POSITIONS}).")
-
-            time.sleep(15)
+            manage_single_position()
+            time.sleep(5)
 
         except Exception as e:
-            log(f"Негізгі циклдегі қате: {e}")
-            time.sleep(10)
+            log(f"Қате: {e}")
+            time.sleep(5)
 
 if __name__ == "__main__":
     main()
