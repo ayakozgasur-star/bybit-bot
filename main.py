@@ -127,6 +127,7 @@ def open_new_step_order():
     
     symbol, signal = get_best_signal()
     if not symbol or signal == "NO TRADE":
+        log(f"🔍 [САТЫ {current_step}] Жұптар тексерілді: Сигнал жоқ. Ордер ізделуде...")
         return False
 
     usdt_amount = float(current_step)
@@ -146,7 +147,7 @@ def open_new_step_order():
 
     if float(formatted_qty) <= 0: return False
 
-    # Hedge Mode режимі үшін positionIdx: LONG = 1, SHORT = 2
+    # Hedge Mode: LONG = 1, SHORT = 2
     if signal == "LONG":
         order_side = "Buy"
         pos_idx = 1
@@ -186,13 +187,11 @@ def manage_single_position():
     pos_idx = int(pos.get('positionIdx', 1 if side == "Buy" else 2))
     unrealised_pnl = float(pos.get('unrealisedPnl', 0))
 
-    # 20x Плечомен:
-    # TP 0.8% баға өзгерісі = +16% маржа пайдасы
-    # SL 0.3% баға өзгерісі = -6% маржа шығыны
+    log(f"📊 [ПОЗИЦИЯ АШЫҚ] {symbol} {side} | Шамасы: {qty} | Ағымдағы PnL: {unrealised_pnl:.2f} USDT")
+
     take_profit_usdt = float(current_step) * 0.16
     stop_loss_usdt = float(current_step) * 0.06
 
-    # 1. МИНУС БОЛСА -> Жауып, келесі сатыға өту ($1 -> $2 -> $3 ... $100)
     if unrealised_pnl <= -stop_loss_usdt:
         close_side = "Sell" if side == "Buy" else "Buy"
         session.place_order(
@@ -211,7 +210,6 @@ def manage_single_position():
             log(f"⚠️ {MAX_STEP}-сатыға жетті. Қайтадан 1-сатыдан ($1) бастайды.")
             current_step = 1
 
-    # 2. ПЛЮС БОЛСА -> Жауып, ҚАЙТАДАН 1-САТЫҒА ($1) ОРАЛУ
     elif unrealised_pnl >= take_profit_usdt:
         close_side = "Sell" if side == "Buy" else "Buy"
         session.place_order(
@@ -247,11 +245,11 @@ def main():
                 break
 
             manage_single_position()
-            time.sleep(5)
+            time.sleep(10)
 
         except Exception as e:
             log(f"Қате: {e}")
-            time.sleep(5)
+            time.sleep(10)
 
 if __name__ == "__main__":
     main()
