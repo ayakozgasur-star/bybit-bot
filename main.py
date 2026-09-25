@@ -1,316 +1,314 @@
-import time
-import json
 import os
+import time
+from datetime import datetime
 import pandas as pd
 import numpy as np
 from pybit.unified_trading import HTTP
 
-# ==================== 1. БАПТАУЛАР (SETTINGS) ====================
-# 🔥 ОСЫ ЖЕРГЕ BYBIT-ТЕН АЛҒАН НАҚТЫ API КІЛТТЕРІҢІЗДІ ЖАЗЫҢЫЗ
-API_KEY = "YOUR_API_KEY"
-API_SECRET = "YOUR_API_SECRET"
+# ==============================================================================
+# CONFIG / PARAMETERS
+# ==============================================================================
+API_KEY = os.getenv("BYBIT_API_KEY", "")
+API_SECRET = os.getenv("BYBIT_API_SECRET", "")
+IS_DEMO = True  # Реал сауда үшін False орнатыңыз
 
-# Реальный аккаунт үшін False, Testnet үшін True
-TESTNET = False  
-
-# Бот тексеретін 6 кандидат монета
-CANDIDATE_SYMBOLS = [
-    "SOLUSDT", "AVAXUSDT", "NEARUSDT", 
-    "XRPUSDT", "DOGEUSDT", "TONUSDT"
+SYMBOLS = [
+    "SOLUSDT", "XRPUSDT", "1000PEPEUSDT", "NEARUSDT", "AVAXUSDT", 
+    "ETHUSDT", "DOGEUSDT", "SUIUSDT", "BTCUSDT", "ADAUSDT", 
+    "BNBUSDT", "LTCUSDT", "LINKUSDT", "DOTUSDT", "APTUSDT"
 ]
 
-# Нысаналы пайда (Target Profit)
-TARGET_PROFIT_USDT = 100.0 
+LEVERAGE = 20                 # Плечо: 20x
+TARGET_TOTAL_PROFIT = 100.0   # Мақсатты таза пайда: +100 USDT
+MAX_OPEN_POSITIONS = 3        # БЕКІТІЛЕТІН МОНЕТАЛАР САНЫ (3 МОНЕТА)
 
-# Мартингейл маржа сатылары (USDT)
-MARTINGALE_STEPS = [1, 4, 7, 12, 19, 30, 48, 75, 120]
+TP_PCT = 0.005  # +0.5% TP
+SL_PCT = 0.003  # -0.3% SL
+PRICE_OFFSET_PCT = 0.0002  # 0.02% Offset (Post-Only Maker үшін)
 
-# Тейк-Профит және Стоп-Лосс (TP 0.5% / SL 0.5%)
-TP_PCT = 0.005  # 0.5%
-SL_PCT = 0.005  # 0.5%
+# ==============================================================================
+# EXACT MARTINGALE STEPS (1, 4, 7, 11, 14, 17, 21, 24, 27, 31...)
+# ==============================================================================
+def get_exact_martingale_steps():
+    """Сіз көрсеткен сатыларды шатаспайтындай етіп 100-сатыға дейін дайындау"""
+    steps = [1, 4, 7, 11, 14, 17, 21, 24, 27, 31]
+    current = 31
+    # Калған сатыларды да тура осы 2 рет +3, 1 рет +4 ережесімен толтырамыз
+    for i in range(11, 101):
+        if i % 3 == 1:
+            current += 4
+        else:
+            current += 3
+        steps.append(current)
+    return steps
 
-# Post-Only лимиттік ордер үшін баға ығысуы (0.02%)
-PRICE_OFFSET_PCT = 0.0002 
+MARTINGALE_STEPS = get_exact_martingale_steps()
 
-# Орындалмаған ордердің күту уақыты (секунд)
-ORDER_TIMEOUT_SEC = 15
-
-# Деректерді сақтайтын файл
-STATE_FILE = "bot_state.json"
-
-# ==================== 2. БИРЖАҒА ҚОСЫЛУ ====================
+# ==============================================================================
+# INITIALIZATION & GLOBALS
+# ==============================================================================
 session = HTTP(
-    testnet=TESTNET,
+    testnet=False,
     api_key=API_KEY,
     api_secret=API_SECRET,
+    demo=IS_DEMO
 )
 
+symbol_steps = {}            # Әр монетаның сатысы
+last_checked_pnl_time = {}   # Бір ордерді екі рет есептемеу үшін
+selected_3_symbols = []      # Бекітілген 3 монета
+initial_balance = 0.0
+
 def log(msg):
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
+    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} [INFO] {msg}", flush=True)
 
-# ==================== 3. ДЕРЕКТЕРДІ САҚТАУ ЖӘНЕ ЖҮКТЕУ ====================
-def load_bot_state():
-    """Сақталған 3 монетаны, сатыларды және жиналған пайданы оқу"""
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "r") as f:
-                data = json.load(f)
-                log(f"💾 Файлдан деректер жүктелді:")
-                log(f"   📌 Монеталар: {data.get('selected_symbols', [])}")
-                log(f"   📊 Сатылар: {data.get('steps', {})}")
-                log(f"   💰 Жиналған пайда: +{data.get('accumulated_profit', 0.0):.2f}$/ {TARGET_PROFIT_USDT}$")
-                return (
-                    data.get("selected_symbols", []),
-                    data.get("steps", {}),
-                    float(data.get("accumulated_profit", 0.0))
-                )
-        except Exception as e:
-            log(f"Файлды оқу қатесі: {e}")
-    return [], {}, 0.0
-
-def save_bot_state(selected_symbols, steps, profit):
-    """Деректерді JSON файлға сақтау"""
+def get_wallet_balance():
     try:
-        data = {
-            "selected_symbols": selected_symbols,
-            "steps": steps,
-            "accumulated_profit": profit
-        }
-        with open(STATE_FILE, "w") as f:
-            json.dump(data, f, indent=4)
+        res = session.get_wallet_balance(accountType="UNIFIED", coin="USDT")
+        if res['retCode'] == 0:
+            coin_info = res['result']['list'][0]['coin'][0]
+            return float(coin_info['walletBalance'])
     except Exception as e:
-        log(f"Деректерді сақтау қатесі: {e}")
+        log(f"Баланс алу қатесі: {e}")
+    return 0.0
 
-# ==================== 4. 6 МОНЕТАДАН ЕҢ ҮЗДІК 3-ЕУІН ТАҢДАУ ====================
-def select_best_3_symbols():
-    """6 монетаны анализдеп, ең үздік 3 монетаны таңдау (Публичный API-мен)"""
-    scores = {}
-    log("🔍 6 кандидат монетаға анализ басталды (Жаңа ТОП-3 монета таңдалады)...")
-    
-    for symbol in CANDIDATE_SYMBOLS:
-        try:
-            res = session.get_kline(category="linear", symbol=symbol, interval="15", limit=50)
-            if res.get('retCode') != 0 or not res.get('result', {}).get('list'):
-                continue
-                
-            df = pd.DataFrame(res['result']['list'], columns=[
-                'startTime', 'open', 'high', 'low', 'close', 'volume', 'turnover'
-            ])
-            df['close'] = df['close'].astype(float)
-            df['high'] = df['high'].astype(float)
-            df['low'] = df['low'].astype(float)
-            df = df.iloc[::-1].reset_index(drop=True)
-            
-            # ATR (Волатильность)
-            df['tr'] = np.maximum(
-                df['high'] - df['low'],
-                np.maximum(
-                    abs(df['high'] - df['close'].shift(1)),
-                    abs(df['low'] - df['close'].shift(1))
-                )
-            )
-            atr = df['tr'].rolling(14).mean().iloc[-1]
-            volatility_pct = (atr / df['close'].iloc[-1]) * 100
-            
-            # RSI
-            delta = df['close'].diff()
-            gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-            rs = gain / loss
-            rsi = 100 - (100 / (1 + rs.iloc[-1]))
-            
-            rsi_score = abs(rsi - 50)
-            total_score = (volatility_pct * 0.6) + (rsi_score * 0.4)
-            scores[symbol] = total_score
-            
-            log(f"   📊 {symbol} -> Волатильность: {volatility_pct:.2f}%, RSI: {rsi:.1f}, Балл: {total_score:.2f}")
-        except Exception as e:
-            log(f"Анализ қатесі ({symbol}): {e}")
+# ==============================================================================
+# INDICATORS & SIGNALS
+# ==============================================================================
+def calc_ema(series, length):
+    return series.ewm(span=length, adjust=False).mean()
 
-    sorted_symbols = sorted(scores, key=scores.get, reverse=True)
-    top_3 = sorted_symbols[:3]
-    
-    if len(top_3) < 3:
-        top_3 = ["SOLUSDT", "XRPUSDT", "NEARUSDT"]
+def calc_rsi(series, length=14):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=length).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=length).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+def get_klines(symbol, interval, limit=50):
+    try:
+        res = session.get_kline(category="linear", symbol=symbol, interval=interval, limit=limit)
+        if res['retCode'] != 0: return None
+        list_data = res['result']['list']
+        df = pd.DataFrame(list_data, columns=['start_time', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
+        df['start_time'] = pd.to_datetime(pd.to_numeric(df['start_time']), unit='ms')
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            df[col] = df[col].astype(float)
+        return df.sort_values('start_time').reset_index(drop=True)
+    except:
+        return None
+
+def find_initial_3_symbols():
+    chosen = []
+    for symbol in SYMBOLS:
+        if len(chosen) >= MAX_OPEN_POSITIONS:
+            break
+        df = get_klines(symbol, "5", limit=50)
+        if df is None or len(df) < 20: continue
         
-    log(f"🎯 ЖАҢА ТОП-3 МОНЕТА БЕКІТІЛДІ: {top_3}")
-    return top_3
+        df['ema_fast'] = calc_ema(df['close'], 10)
+        df['ema_slow'] = calc_ema(df['close'], 30)
+        df['rsi'] = calc_rsi(df['close'], 14)
+        
+        last = df.iloc[-2]
+        if (last['ema_fast'] > last['ema_slow'] and last['rsi'] > 50) or \
+           (last['ema_fast'] < last['ema_slow'] and last['rsi'] < 50):
+            chosen.append(symbol)
+            
+    return chosen
 
-# ==================== 5. PRECISION (ДӘЛДІК) АЛУ ====================
-def get_symbol_precisions(symbol):
-    """Bybit-тен монетаның бағасы мен көлемінің дөңгелектеу дәлдігін алу"""
+def get_symbol_signal(symbol):
+    df = get_klines(symbol, "5", limit=50)
+    if df is None or len(df) < 20: return "LONG"
+    
+    df['ema_fast'] = calc_ema(df['close'], 10)
+    df['ema_slow'] = calc_ema(df['close'], 30)
+    df['rsi'] = calc_rsi(df['close'], 14)
+    
+    last = df.iloc[-2]
+    if last['ema_fast'] < last['ema_slow'] and last['rsi'] < 50:
+        return "SHORT"
+    return "LONG"
+
+# ==============================================================================
+# MARTINGALE STEP & PNL ACCURACY CONTROL
+# ==============================================================================
+def update_step_for_symbol(symbol):
+    """ByBit-тен жабылған ордер P&L-ін дәл алып, сатыны реттеу"""
+    global symbol_steps, last_checked_pnl_time
+    
+    time.sleep(2)  # ByBit базасын жаңартуға 2 сек кідіріс
+    try:
+        res = session.get_closed_pnl(category="linear", symbol=symbol, limit=1)
+        if res['retCode'] == 0 and len(res['result']['list']) > 0:
+            last_order = res['result']['list'][0]
+            updated_time = last_order['updatedTime']
+            
+            # Егер осы ордер бұған дейін тексерілген болса, қайталамаймыз
+            if last_checked_pnl_time.get(symbol) == updated_time:
+                return
+            
+            last_checked_pnl_time[symbol] = updated_time
+            last_pnl = float(last_order['closedPnl'])
+
+            if last_pnl > 0:
+                symbol_steps[symbol] = 0  # Тейк-профит соғылса -> 1-сатыға ($1) түсеміз
+                log(f"✅ [{symbol}] ТЕЙК-ПРОФИТ (+{last_pnl:.2f} USDT)! Саты қайтадан #1-ге ($1) түсті.")
+            elif last_pnl < 0:
+                symbol_steps[symbol] = symbol_steps.get(symbol, 0) + 1  # Стоп-лосс соғылса -> Саты +1
+                current_step_num = symbol_steps[symbol] + 1
+                next_margin = MARTINGALE_STEPS[symbol_steps[symbol]]
+                log(f"🔻 [{symbol}] СТОП-ЛОСС ({last_pnl:.2f} USDT). Келесі саты: #{current_step_num} (Маржа: ${next_margin} USDT)")
+
+    except Exception as e:
+        log(f"P&L бақылау қатесі ({symbol}): {e}")
+
+# ==============================================================================
+# TRADE EXECUTION (MAKER POST-ONLY)
+# ==============================================================================
+def get_active_positions():
+    try:
+        res = session.get_positions(category="linear", settleCoin="USDT")
+        if res['retCode'] == 0:
+            return [p for p in res['result']['list'] if float(p['size']) > 0]
+    except Exception as e:
+        log(f"Позицияларды алу қатесі: {e}")
+    return []
+
+def set_leverage(symbol):
+    try:
+        session.set_leverage(category="linear", symbol=symbol, buyLeverage=str(LEVERAGE), sellLeverage=str(LEVERAGE))
+    except:
+        pass
+
+def format_value(value, step):
+    if step is None or step == 0: return str(value)
+    precision = 0
+    step_str = f"{step:.8f}".rstrip('0')
+    if '.' in step_str: precision = len(step_str.split('.')[1])
+    return f"{round(value, precision):.{precision}f}"
+
+def get_symbol_info(symbol):
     try:
         res = session.get_instruments_info(category="linear", symbol=symbol)
-        if res.get('retCode') == 0:
+        if res['retCode'] == 0:
             info = res['result']['list'][0]
-            tick_size = info['priceFilter']['tickSize']
-            qty_step = info['lotSizeFilter']['qtyStep']
-            
-            price_prec = len(tick_size.split('.')[1]) if '.' in tick_size else 0
-            qty_prec = len(qty_step.split('.')[1]) if '.' in qty_step else 0
-            return price_prec, qty_prec
-    except Exception as e:
-        log(f"Precision алу қатесі ({symbol}): {e}")
-    return 4, 1
-
-# ==================== 6. ОРДЕРЛЕРДІ ТАЗАЛАУ ЖӘНЕ P&L ====================
-def cancel_unfilled_orders(symbol):
-    """15 секундтан асып, орындалмай ілініп тұрған ордерлерді жою"""
-    try:
-        res = session.get_open_orders(category="linear", symbol=symbol)
-        if res.get('retCode') == 0:
-            orders = res['result']['list']
-            current_time = time.time()
-            for o in orders:
-                created_time = int(o['createdTime']) / 1000
-                if current_time - created_time > ORDER_TIMEOUT_SEC:
-                    session.cancel_order(category="linear", symbol=symbol, orderId=o['orderId'])
-                    log(f"⚠️ [{symbol}] {ORDER_TIMEOUT_SEC} сек ішінде орындалмаған ордер жойылды.")
-        elif res.get('retCode') == 10003 or res.get('retCode') == 10004:
-            log(f"🚨 API Key қатесі (401 / Invalid API). `API_KEY` мен `API_SECRET` тексеріңіз!")
-    except Exception as e:
-        log(f"Ордерді жою қатесі ({symbol}): {e}")
-
-def update_step_for_symbol(symbol):
-    """Позиция жабылғанда P&L тексеру және +100$ мақсатын бақылау"""
-    global symbol_steps, selected_symbols, total_accumulated_profit
-    try:
-        time.sleep(2)
-        res = session.get_closed_pnl(category="linear", symbol=symbol, limit=1)
-        if res.get('retCode') == 0 and res['result']['list']:
-            last_trade = res['result']['list'][0]
-            closed_pnl = float(last_trade.get('closedPnl', 0))
-            
-            total_accumulated_profit += closed_pnl
-            
-            if closed_pnl > 0:
-                symbol_steps[symbol] = 0
-                log(f"✅ [{symbol}] TP соғылды (PnL: +{closed_pnl:.2f}$). Жалпы пайда: +{total_accumulated_profit:.2f}$/ {TARGET_PROFIT_USDT}$")
-            else:
-                symbol_steps[symbol] += 1
-                log(f"❌ [{symbol}] SL соғылды (PnL: {closed_pnl:.2f}$). Келесі саты: #{symbol_steps[symbol] + 1}. Жалпы пайда: {total_accumulated_profit:.2f}$")
-            
-            if total_accumulated_profit >= TARGET_PROFIT_USDT:
-                log(f"🎉🎉🎉 МAҚСАТ ОРЫНДАЛДЫ! Пайда +{total_accumulated_profit:.2f}$ USDT-ға жетті!")
-                log("🔄 Монеталар тізімі тазаланып, жаңа ТОП-3 монета қайта таңдалады...")
-                
-                total_accumulated_profit = 0.0
-                selected_symbols = select_best_3_symbols()
-                symbol_steps = {s: 0 for s in selected_symbols}
-                
-                for s in selected_symbols:
-                    try:
-                        session.set_leverage(category="linear", symbol=s, buyLeverage="10", sellLeverage="10")
-                    except:
-                        pass
-
-            save_bot_state(selected_symbols, symbol_steps, total_accumulated_profit)
-    except Exception as e:
-        log(f"PnL тексеру қатесі ({symbol}): {e}")
-
-# ==================== 7. ПОЗИЦИЯ ЖӘНЕ ОРДЕР АШУ ====================
-def get_position(symbol):
-    try:
-        res = session.get_positions(category="linear", symbol=symbol)
-        if res.get('retCode') == 0:
-            for p in res['result']['list']:
-                if float(p['size']) > 0:
-                    return p
-        elif res.get('retCode') in [10003, 10004, 10005]:
-            log(f"🚨 API Key/Secret қатесі немесе авторизация жоқ (ErrCode: {res.get('retCode')}).")
-    except Exception as e:
-        log(f"Позицияны тексеру қатесі ({symbol}): {e}")
-    return None
+            qty_step = float(info['lotSizeFilter']['qtyStep'])
+            price_step = float(info['priceFilter']['tickSize'])
+            return qty_step, price_step
+    except: pass
+    return None, None
 
 def open_order_for_symbol(symbol):
     global symbol_steps
     
-    cancel_unfilled_orders(symbol)
-    
-    pos = get_position(symbol)
-    open_orders_res = session.get_open_orders(category="linear", symbol=symbol)
-    
-    if open_orders_res.get('retCode') != 0:
-        return
-        
-    open_orders = open_orders_res['result']['list']
-    
-    if pos or len(open_orders) > 0:
-        return
-
+    # 1. Алдымен соңғы P&L нәтижесін тексереміз
     update_step_for_symbol(symbol)
 
     step_idx = symbol_steps.get(symbol, 0)
+    # Саты индексі массивтен асып кетпеуін қадағалаймыз
     if step_idx >= len(MARTINGALE_STEPS):
         step_idx = len(MARTINGALE_STEPS) - 1
 
     usdt_margin = MARTINGALE_STEPS[step_idx]
+    signal = get_symbol_signal(symbol)
 
-    ticker = session.get_tickers(category="linear", symbol=symbol)
-    last_price = float(ticker['result']['list'][0]['lastPrice'])
+    df = get_klines(symbol, "5", limit=5)
+    if df is None: return False
+    close_price = df['close'].iloc[-1]
+    
+    qty_step, price_step = get_symbol_info(symbol)
+    if not qty_step or not price_step: return False
 
-    limit_price = last_price * (1 - PRICE_OFFSET_PCT)
-    qty = (usdt_margin * 10) / limit_price
+    set_leverage(symbol)
+    
+    position_size_usdt = usdt_margin * LEVERAGE
+    raw_qty = position_size_usdt / close_price
+    formatted_qty = format_value(raw_qty, qty_step)
 
-    tp_price = limit_price * (1 + TP_PCT)
-    sl_price = limit_price * (1 - SL_PCT)
+    if float(formatted_qty) <= 0: return False
 
-    price_prec, qty_prec = get_symbol_precisions(symbol)
+    # MAKER ЛОГИКАСЫ (Post-Only offset)
+    if signal == "LONG":
+        order_side = "Buy"
+        pos_idx = 1
+        limit_price = close_price * (1 - PRICE_OFFSET_PCT)
+        tp_price = close_price * (1 + TP_PCT)
+        sl_price = close_price * (1 - SL_PCT)
+    else:
+        order_side = "Sell"
+        pos_idx = 2
+        limit_price = close_price * (1 + PRICE_OFFSET_PCT)
+        tp_price = close_price * (1 - TP_PCT)
+        sl_price = close_price * (1 + SL_PCT)
 
-    try:
-        res = session.place_order(
-            category="linear",
-            symbol=symbol,
-            side="Buy",
-            orderType="Limit",
-            qty=str(round(qty, qty_prec)),
-            price=str(round(limit_price, price_prec)),
-            takeProfit=str(round(tp_price, price_prec)),
-            stopLoss=str(round(sl_price, price_prec)),
-            timeInForce="PostOnly",
-            isLeverage=1
-        )
-        if res.get('retCode') == 0:
-            log(f"🚀 [{symbol}] Post-Only ордер қойылды! Маржа: ${usdt_margin} (Саты #{step_idx + 1}) | Баға: {limit_price:.4f}")
-        else:
-            log(f"❌ [{symbol}] Ордер қойылмады: {res.get('retMsg')} (Code: {res.get('retCode')})")
-    except Exception as e:
-        log(f"Ордер қою қатесі ({symbol}): {e}")
+    formatted_limit = format_value(limit_price, price_step)
+    formatted_tp = format_value(tp_price, price_step)
+    formatted_sl = format_value(sl_price, price_step)
 
-# ==================== 8. НЕГІЗГІ ЦИКЛ (MAIN LOOP) ====================
+    res = session.place_order(
+        category="linear",
+        symbol=symbol,
+        side=order_side,
+        orderType="Limit",
+        price=formatted_limit,
+        qty=formatted_qty,
+        takeProfit=formatted_tp,
+        stopLoss=formatted_sl,
+        positionIdx=pos_idx,
+        orderFilter="Order",
+        execInst="PostOnly"  # ТЕК MAKER МЕН ОРЫНДАУ
+    )
+    
+    if res['retCode'] == 0:
+        log(f"🎯 [{symbol}] MAKER ОРДЕР АШЫЛДЫ | Саты #{step_idx + 1} | Маржа: ${usdt_margin} USDT | Бағасы: {formatted_limit}")
+        return True
+    return False
+
+# ==============================================================================
+# MAIN LOOP
+# ==============================================================================
 def main():
-    global selected_symbols, symbol_steps, total_accumulated_profit
-    log("🤖 Бот іске қосылуда...")
+    global initial_balance, symbol_steps, selected_3_symbols
+    log(f"🚀 Бот іске қосылды (Нақты Сатылық Мартингейл | 3 Монета | Post-Only Maker | Мақсат: +{TARGET_TOTAL_PROFIT} USDT)")
     
-    # 1. Файлды тексереміз
-    selected_symbols, symbol_steps, total_accumulated_profit = load_bot_state()
-    
-    # 2. Егер файл бос болса, 3 монета таңдаймыз
-    if not selected_symbols:
-        selected_symbols = select_best_3_symbols()
-        symbol_steps = {s: 0 for s in selected_symbols}
-        total_accumulated_profit = 0.0
-        save_bot_state(selected_symbols, symbol_steps, total_accumulated_profit)
-
-    # 10x плечо орнату
-    for s in selected_symbols:
-        try:
-            session.set_leverage(category="linear", symbol=s, buyLeverage="10", sellLeverage="10")
-        except Exception as e:
-            pass
-
-    log(f"⚡ Бот сауданы бастайды. Ағымдағы монеталар: {selected_symbols}")
-    log(f"📊 Жиналған пайда: +{total_accumulated_profit:.2f}$/ {TARGET_PROFIT_USDT}$")
+    initial_balance = get_wallet_balance()
+    log(f"💵 Бастапқы Баланс: {initial_balance:.2f} USDT")
 
     while True:
         try:
-            for symbol in list(selected_symbols):
-                open_order_for_symbol(symbol)
-                
-            time.sleep(1.0)  # API лимитке түсіп қалмас үшін 1 секундтық қауіпсіз кідіріс
+            current_balance = get_wallet_balance()
+            total_profit = current_balance - initial_balance
+
+            if total_profit >= TARGET_TOTAL_PROFIT:
+                log(f"🎉 МАҚСАТ ОРЫНДАЛДЫ! +100 USDT таза пайда жиналды. Сауда тоқтатылды.")
+                break
+
+            # 1. 3 негізгі монетаны таңдау
+            if len(selected_3_symbols) < MAX_OPEN_POSITIONS:
+                selected_3_symbols = find_initial_3_symbols()
+                if len(selected_3_symbols) == MAX_OPEN_POSITIONS:
+                    for s in selected_3_symbols:
+                        symbol_steps[s] = 0
+                    log(f"📌 НЕГІЗГІ 3 МОНЕТА БЕКІТІЛДІ: {selected_3_symbols}.")
+                else:
+                    time.sleep(5)
+                    continue
+
+            # 2. Белсенді позицияларды бақылау
+            positions = get_active_positions()
+            active_symbols = [p['symbol'] for p in positions]
+
+            # 3. 3 монетаның сатысын қатаң тексеріп, жаңа ордер ашу
+            for symbol in selected_3_symbols:
+                if symbol not in active_symbols:
+                    open_order_for_symbol(symbol)
+
+            time.sleep(3)
+
         except Exception as e:
-            log(f"Цикл қатесі: {e}")
-            time.sleep(2)
+            log(f"Қате: {e}")
+            time.sleep(3)
 
 if __name__ == "__main__":
     main()
