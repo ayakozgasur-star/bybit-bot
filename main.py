@@ -6,7 +6,7 @@ import numpy as np
 from pybit.unified_trading import HTTP
 
 # ==============================================================================
-# ULTIMATE PRO MARTINGALE CONFIG (EMA + RSI + BB + MACD + ATR)
+# ULTRA-FAST & SHARP STOCH-RSI MARTINGALE CONFIG
 # ==============================================================================
 API_KEY = os.getenv("BYBIT_API_KEY", "")
 API_SECRET = os.getenv("BYBIT_API_SECRET", "")
@@ -18,7 +18,7 @@ LEVERAGE = 15
 BASE_MARGIN = 5.0              
 MAX_STEPS = 10                 
 MAX_OPEN_POSITIONS = 3         
-STEP_DISTANCE_PCT = 0.005      # 0.5% адым арақашықтығы
+STEP_DISTANCE_PCT = 0.003      # 0.3% адым арақашықтығы
 
 session = HTTP(testnet=False, api_key=API_KEY, api_secret=API_SECRET, demo=IS_DEMO)
 
@@ -30,7 +30,7 @@ symbol_state = {
 }
 
 def log(msg):
-    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} [PRO-BOT] {msg}", flush=True)
+    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} [STOCH-BOT] {msg}", flush=True)
 
 def format_value(value, step):
     if step is None or step == 0: return str(value)
@@ -38,7 +38,7 @@ def format_value(value, step):
     precision = len(step_str.split('.')[1]) if '.' in step_str else 0
     return f"{round(value, precision):.{precision}f}"
 
-def get_klines(symbol, interval, limit=100):
+def get_klines(symbol, interval, limit=60):
     try:
         res = session.get_kline(category="linear", symbol=symbol, interval=interval, limit=limit)
         if res.get('retCode') != 0: return None
@@ -51,7 +51,7 @@ def get_klines(symbol, interval, limit=100):
         return None
 
 # ==============================================================================
-# ИНДИКАТОРЛАР (EMA, RSI, BOLLINGER BANDS, MACD, ATR)
+# ЖЫЛДАМ ИНДИКАТОРЛАР (EMA 3/8 + ATR + STOCHASTIC RSI)
 # ==============================================================================
 def calc_ema(series, length):
     return series.ewm(span=length, adjust=False).mean()
@@ -63,20 +63,14 @@ def calc_rsi(series, period=14):
     rs = gain / loss
     return 100 - (100 / (1 + rs))
 
-def calc_bollinger_bands(series, window=20, num_std=2):
-    sma = series.rolling(window).mean()
-    std = series.rolling(window).std()
-    upper = sma + (std * num_std)
-    lower = sma - (std * num_std)
-    return upper, lower
-
-def calc_macd(series, fast=12, slow=26, signal=9):
-    exp1 = series.ewm(span=fast, adjust=False).mean()
-    exp2 = series.ewm(span=slow, adjust=False).mean()
-    macd_line = exp1 - exp2
-    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
-    histogram = macd_line - signal_line
-    return macd_line, signal_line, histogram
+def calc_stoch_rsi(series, period=14, smooth_k=3, smooth_d=3):
+    rsi = calc_rsi(series, period)
+    min_rsi = rsi.rolling(window=period).min()
+    max_rsi = rsi.rolling(window=period).max()
+    stoch_rsi = (rsi - min_rsi) / (max_rsi - min_rsi + 1e-9)
+    k = stoch_rsi.rolling(window=smooth_k).mean() * 100
+    d = k.rolling(window=smooth_d).mean()
+    return k, d
 
 def calc_atr(df, period=14):
     high_low = df['high'] - df['low']
@@ -85,35 +79,30 @@ def calc_atr(df, period=14):
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     return tr.rolling(period).mean()
 
-def check_advanced_signal(symbol):
-    df = get_klines(symbol, interval="15", limit=100)
-    if df is None or len(df) < 50: return "WAIT", 0.0, 0.0
+def check_stoch_signal(symbol):
+    # 5 минуттық таймфрейм арқылы өте жиі әрі жылдам сигнал ұстау
+    df = get_klines(symbol, interval="5", limit=60)
+    if df is None or len(df) < 30: return "WAIT", 0.0, 0.0
 
-    # Барлық индикаторларды бөлек-бөлек дұрыс есептеу
-    df['ema9'] = calc_ema(df['close'], 9)
-    df['ema21'] = calc_ema(df['close'], 21)
-    df['rsi'] = calc_rsi(df['close'], 14)
-    
-    # Түзетілген жері:
-    df['bb_upper'], df['bb_lower'] = calc_bollinger_bands(df['close'])
-    
-    df['macd'], df['macd_signal'], df['macd_hist'] = calc_macd(df['close'])
+    df['ema3'] = calc_ema(df['close'], 3)
+    df['ema8'] = calc_ema(df['close'], 8)
+    df['stoch_k'], df['stoch_d'] = calc_stoch_rsi(df['close'])
     df['atr'] = calc_atr(df)
     
     curr = df.iloc[-1]
     prev = df.iloc[-2]
 
     current_close = curr['close']
-    current_atr = curr['atr'] if not np.isnan(curr['atr']) else current_close * 0.004
+    current_atr = curr['atr'] if not np.isnan(curr['atr']) else current_close * 0.003
 
-    # БОЛЛИНДЖЕР мен MACD растауы бар Лонг сигналы
-    if prev['ema9'] <= prev['ema21'] and curr['ema9'] > curr['ema21']:
-        if curr['rsi'] > 45 and curr['macd_hist'] > 0 and current_close <= curr['bb_upper']:
+    # Лонг сигналы: EMA 3 жоғарыға қиып өтті + StochRSI төменгі аймақтан (20-дан) жоғарыға бет алды
+    if prev['ema3'] <= prev['ema8'] and curr['ema3'] > curr['ema8']:
+        if curr['stoch_k'] < 80:  # Шамадан тыс жоғары болып кетпесе
             return "Buy", current_close, current_atr
 
-    # БОЛЛИНДЖЕР мен MACD растауы бар Шорт сигналы
-    if prev['ema9'] >= prev['ema21'] and curr['ema9'] < curr['ema21']:
-        if curr['rsi'] < 55 and curr['macd_hist'] < 0 and current_close >= curr['bb_lower']:
+    # Шорт сигналы: EMA 3 төменге қиып өтті + StochRSI жоғарғы аймақтан (80-нен) төменге бет алды
+    if prev['ema3'] >= prev['ema8'] and curr['ema3'] < curr['ema8']:
+        if curr['stoch_k'] > 20:  # Шамадан тыс төмен құлап кетпесе
             return "Sell", current_close, current_atr
 
     return "WAIT", current_close, current_atr
@@ -164,8 +153,8 @@ def open_martingale_step(symbol, side, step_index, close_price, atr_value):
 
     new_avg_price = ((prev_avg * prev_qty) + (close_price * curr_qty)) / (prev_qty + curr_qty) if prev_qty > 0 else close_price
 
-    tp_pct = 0.005  # +0.5% Take-Profit
-    sl_pct = max(0.003, min((atr_value / close_price) * 1.5, 0.008))
+    tp_pct = 0.004  # +0.4% Take-Profit
+    sl_pct = max(0.003, min((atr_value / close_price) * 1.2, 0.006)) # Динамикалық ATR Стоп-Лосс
 
     if side == "Buy":
         pos_idx = 1
@@ -187,7 +176,7 @@ def open_martingale_step(symbol, side, step_index, close_price, atr_value):
             stopLoss=format_value(sl, price_step), positionIdx=pos_idx
         )
         if res.get('retCode') == 0:
-            log(f"🔥 [{symbol}] PRO ОРДЕР АШЫЛДЫ! Қадам: {step_index + 1}/{MAX_STEPS} | Бағыт: {side} | Маржа: ${margin}")
+            log(f"🔥 [{symbol}] STOCH-RSI ОРДЕР АШЫЛДЫ! Қадам: {step_index + 1}/{MAX_STEPS} | Бағыт: {side} | Маржа: ${margin}")
             symbol_state[symbol].update({
                 "step": step_index, "active": True, "last_price": close_price,
                 "avg_price": new_avg_price, "total_qty": symbol_state[symbol]["total_qty"] + curr_qty,
@@ -213,7 +202,7 @@ def reset_symbol_state(symbol):
     })
 
 def main():
-    log(f"🚀 PRO-БОТ (EMA + RSI + BB + MACD + ATR) ІСКЕ ҚОСЫЛДЫ")
+    log(f"🚀 STOCH-RSI PRO-БОТ ІСКЕ ҚОСЫЛДЫ (Жиі әрі дәл сауда)")
     while True:
         try:
             all_active = get_active_positions()
@@ -245,16 +234,16 @@ def main():
                     if symbol_state[symbol]["step"] == 0 and len(active_syms) >= MAX_OPEN_POSITIONS:
                         continue
 
-                    signal, close_price, atr_val = check_advanced_signal(symbol)
+                    signal, close_price, atr_val = check_stoch_signal(symbol)
                     if signal != "WAIT":
                         step_num = symbol_state[symbol]["step"]
                         if open_martingale_step(symbol, signal, step_num, close_price, atr_val):
                             if symbol not in active_syms: active_syms.append(symbol)
 
-            time.sleep(10)
+            time.sleep(5)
         except Exception as e:
             log(f"Цикл қатесі: {e}")
-            time.sleep(5)
+            time.sleep(3)
 
 if __name__ == "__main__":
     main()
