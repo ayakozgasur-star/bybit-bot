@@ -89,11 +89,14 @@ def check_advanced_signal(symbol):
     df = get_klines(symbol, interval="15", limit=100)
     if df is None or len(df) < 50: return "WAIT", 0.0, 0.0
 
-    # Барлық индикаторларды есептеу
+    # Барлық индикаторларды бөлек-бөлек дұрыс есептеу
     df['ema9'] = calc_ema(df['close'], 9)
     df['ema21'] = calc_ema(df['close'], 21)
     df['rsi'] = calc_rsi(df['close'], 14)
-    df['bb_upper', 'bb_lower'] = calc_bollinger_bands(df['close'])
+    
+    # Түзетілген жері:
+    df['bb_upper'], df['bb_lower'] = calc_bollinger_bands(df['close'])
+    
     df['macd'], df['macd_signal'], df['macd_hist'] = calc_macd(df['close'])
     df['atr'] = calc_atr(df)
     
@@ -161,9 +164,8 @@ def open_martingale_step(symbol, side, step_index, close_price, atr_value):
 
     new_avg_price = ((prev_avg * prev_qty) + (close_price * curr_qty)) / (prev_qty + curr_qty) if prev_qty > 0 else close_price
 
-    # ДИНАМИКАЛЫҚ TP мен SL (ATR негізінде немесе стандартты пайызбен)
     tp_pct = 0.005  # +0.5% Take-Profit
-    sl_pct = max(0.003, min((atr_value / close_price) * 1.5, 0.008)) # ATR негізгі стоп-лоссы (0.3% - 0.8% аралығында)
+    sl_pct = max(0.003, min((atr_value / close_price) * 1.5, 0.008))
 
     if side == "Buy":
         pos_idx = 1
