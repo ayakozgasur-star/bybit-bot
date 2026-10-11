@@ -6,54 +6,44 @@ import numpy as np
 from pybit.unified_trading import HTTP
 
 # ==============================================================================
-# ALWAYS-SIGNAL CHECK 10-STEP MARTINGALE CONFIG
+# ULTIMATE PRO MARTINGALE CONFIG (EMA + RSI + BB + MACD + ATR)
 # ==============================================================================
 API_KEY = os.getenv("BYBIT_API_KEY", "")
 API_SECRET = os.getenv("BYBIT_API_SECRET", "")
-IS_DEMO = True  # Demo режимі
+IS_DEMO = True
 
 SYMBOLS = ["SOLUSDT", "XRPUSDT", "1000PEPEUSDT", "NEARUSDT", "ETHUSDT"]
 
-LEVERAGE = 15                  # 15x Плечо
-BASE_MARGIN = 5.0              # 1-ордер маржасы $5 USDT
-MAX_STEPS = 10                 # Максимум 10 адым
-MAX_OPEN_POSITIONS = 2         # Бір уақытта максимум 2 монета
-STEP_DISTANCE_PCT = 0.008      # Минималды қашықтық (-0.8%)
+LEVERAGE = 15                  
+BASE_MARGIN = 5.0              
+MAX_STEPS = 10                 
+MAX_OPEN_POSITIONS = 3         
+STEP_DISTANCE_PCT = 0.005      # 0.5% адым арақашықтығы
 
-session = HTTP(
-    testnet=False,
-    api_key=API_KEY,
-    api_secret=API_SECRET,
-    demo=IS_DEMO
-)
+session = HTTP(testnet=False, api_key=API_KEY, api_secret=API_SECRET, demo=IS_DEMO)
 
 symbol_state = {
     symbol: {
-        "step": 0, 
-        "active": False, 
-        "pending_next_step": False,  # Келесі адым үшін сигнал күту режимі
-        "last_price": 0.0,
-        "avg_price": 0.0,
-        "total_qty": 0.0
+        "step": 0, "active": False, "last_price": 0.0,
+        "avg_price": 0.0, "total_qty": 0.0, "entry_side": None
     } for symbol in SYMBOLS
 }
 
 def log(msg):
-    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} [SIGNAL-MARTINGALE] {msg}", flush=True)
+    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} [PRO-BOT] {msg}", flush=True)
 
 def format_value(value, step):
-    if step is None or step == 0: 
-        return str(value)
+    if step is None or step == 0: return str(value)
     step_str = f"{step:.8f}".rstrip('0')
     precision = len(step_str.split('.')[1]) if '.' in step_str else 0
     return f"{round(value, precision):.{precision}f}"
 
-def get_klines(symbol, interval, limit=200):
+def get_klines(symbol, interval, limit=100):
     try:
         res = session.get_kline(category="linear", symbol=symbol, interval=interval, limit=limit)
         if res.get('retCode') != 0: return None
         df = pd.DataFrame(res['result']['list'], columns=['start_time', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
-        for col in ['open', 'high', 'low', 'close']: 
+        for col in ['open', 'high', 'low', 'close', 'volume']: 
             df[col] = df[col].astype(float)
         return df.iloc[::-1].reset_index(drop=True)
     except Exception as e:
@@ -61,7 +51,7 @@ def get_klines(symbol, interval, limit=200):
         return None
 
 # ==============================================================================
-# ИНДИКАТОРЛАР ЖӘНЕ ТЕРЕҢ АНАЛИЗ (EMA, RSI, ADX)
+# ИНДИКАТОРЛАР (EMA, RSI, BOLLINGER BANDS, MACD, ATR)
 # ==============================================================================
 def calc_ema(series, length):
     return series.ewm(span=length, adjust=False).mean()
@@ -73,68 +63,67 @@ def calc_rsi(series, period=14):
     rs = gain / loss
     return 100 - (100 / (1 + rs))
 
-def calc_adx(df, length=14):
-    df = df.copy()
-    df['up'] = df['high'] - df['high'].shift(1)
-    df['down'] = df['low'].shift(1) - df['low']
-    df['+dm'] = np.where((df['up'] > df['down']) & (df['up'] > 0), df['up'], 0)
-    df['-dm'] = np.where((df['down'] > df['up']) & (df['down'] > 0), df['down'], 0)
-    
+def calc_bollinger_bands(series, window=20, num_std=2):
+    sma = series.rolling(window).mean()
+    std = series.rolling(window).std()
+    upper = sma + (std * num_std)
+    lower = sma - (std * num_std)
+    return upper, lower
+
+def calc_macd(series, fast=12, slow=26, signal=9):
+    exp1 = series.ewm(span=fast, adjust=False).mean()
+    exp2 = series.ewm(span=slow, adjust=False).mean()
+    macd_line = exp1 - exp2
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    histogram = macd_line - signal_line
+    return macd_line, signal_line, histogram
+
+def calc_atr(df, period=14):
     high_low = df['high'] - df['low']
     high_close = np.abs(df['high'] - df['close'].shift())
     low_close = np.abs(df['low'] - df['close'].shift())
-    df['tr'] = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    return tr.rolling(period).mean()
+
+def check_advanced_signal(symbol):
+    df = get_klines(symbol, interval="15", limit=100)
+    if df is None or len(df) < 50: return "WAIT", 0.0, 0.0
+
+    # Барлық индикаторларды есептеу
+    df['ema9'] = calc_ema(df['close'], 9)
+    df['ema21'] = calc_ema(df['close'], 21)
+    df['rsi'] = calc_rsi(df['close'], 14)
+    df['bb_upper', 'bb_lower'] = calc_bollinger_bands(df['close'])
+    df['macd'], df['macd_signal'], df['macd_hist'] = calc_macd(df['close'])
+    df['atr'] = calc_atr(df)
     
-    df['atr'] = df['tr'].rolling(length).mean()
-    df['+di'] = 100 * (df['+dm'].rolling(length).mean() / df['atr'])
-    df['-di'] = 100 * (df['-dm'].rolling(length).mean() / df['atr'])
-    
-    df['dx'] = 100 * np.abs(df['+di'] - df['-di']) / (df['+di'] + df['-di'])
-    return df['dx'].rolling(length).mean()
+    curr = df.iloc[-1]
+    prev = df.iloc[-2]
 
-def analyze_deep_market(symbol):
-    """ӘРБІР адым алдында шақырылатын талдау"""
-    df_1h = get_klines(symbol, interval="60", limit=200)
-    if df_1h is None or len(df_1h) < 200: return "WAIT"
-    
-    df_1h['ema200'] = calc_ema(df_1h['close'], 200)
-    main_trend = "BULL" if df_1h['close'].iloc[-1] >= df_1h['ema200'].iloc[-1] else "BEAR"
+    current_close = curr['close']
+    current_atr = curr['atr'] if not np.isnan(curr['atr']) else current_close * 0.004
 
-    df_15m = get_klines(symbol, interval="15", limit=100)
-    if df_15m is None or len(df_15m) < 50: return "WAIT"
+    # БОЛЛИНДЖЕР мен MACD растауы бар Лонг сигналы
+    if prev['ema9'] <= prev['ema21'] and curr['ema9'] > curr['ema21']:
+        if curr['rsi'] > 45 and curr['macd_hist'] > 0 and current_close <= curr['bb_upper']:
+            return "Buy", current_close, current_atr
 
-    df_15m['ema_fast'] = calc_ema(df_15m['close'], 9)
-    df_15m['ema_slow'] = calc_ema(df_15m['close'], 21)
-    df_15m['rsi'] = calc_rsi(df_15m['close'], 14)
-    df_15m['adx'] = calc_adx(df_15m, 14)
+    # БОЛЛИНДЖЕР мен MACD растауы бар Шорт сигналы
+    if prev['ema9'] >= prev['ema21'] and curr['ema9'] < curr['ema21']:
+        if curr['rsi'] < 55 and curr['macd_hist'] < 0 and current_close >= curr['bb_lower']:
+            return "Sell", current_close, current_atr
 
-    curr = df_15m.iloc[-1]
-    prev = df_15m.iloc[-2]
-
-    # ADX Флет фильтрі (ADX > 20 болуы шарт)
-    if pd.isna(curr['adx']) or curr['adx'] < 20:
-        return "WAIT"
-
-    if main_trend == "BULL" and prev['ema_fast'] <= prev['ema_slow'] and curr['ema_fast'] > curr['ema_slow']:
-        if curr['rsi'] > 50: return "Buy"
-
-    if main_trend == "BEAR" and prev['ema_fast'] >= prev['ema_slow'] and curr['ema_fast'] < curr['ema_slow']:
-        if curr['rsi'] < 50: return "Sell"
-
-    return "WAIT"
+    return "WAIT", current_close, current_atr
 
 # ==============================================================================
-# ДИНАМИКАЛЫҚ МАРЖА ЖӘНЕ ТРЕЙДИНГ
+# МАРЖА ЖӘНЕ ОРДЕР БАСҚАРУ
 # ==============================================================================
 def calculate_margin_for_step(step_index):
     margin = BASE_MARGIN
     for i in range(step_index):
-        if i < 3:
-            multiplier = 2.0
-        elif i < 6:
-            multiplier = 1.5
-        else:
-            multiplier = 1.2
+        if i < 3: multiplier = 2.0
+        elif i < 6: multiplier = 1.5
+        else: multiplier = 1.2
         margin *= multiplier
     return round(margin, 2)
 
@@ -143,24 +132,16 @@ def get_active_positions(symbol=None):
         res = session.get_positions(category="linear", settleCoin="USDT")
         if res.get('retCode') == 0:
             positions = [p for p in res['result']['list'] if float(p['size']) > 0]
-            if symbol:
-                return [p for p in positions if p['symbol'] == symbol]
+            if symbol: return [p for p in positions if p['symbol'] == symbol]
             return positions
-    except Exception as e:
-        log(f"Позиция тексеру қатесі: {e}")
+    except Exception: pass
     return []
 
-def open_martingale_step(symbol, side, step_index):
-    df = get_klines(symbol, interval="15", limit=5)
-    if df is None: return False
-    close_price = df['close'].iloc[-1]
-
-    # Қашықтықты тексеру (2-адымнан бастап)
+def open_martingale_step(symbol, side, step_index, close_price, atr_value):
     if step_index > 0 and symbol_state[symbol]["last_price"] > 0:
         last_price = symbol_state[symbol]["last_price"]
-        price_diff = abs(close_price - last_price) / last_price
-        if price_diff < STEP_DISTANCE_PCT:
-            return False  # Баға әлі -0.8% жылжыған жоқ
+        if abs(close_price - last_price) / last_price < STEP_DISTANCE_PCT:
+            return False
 
     try:
         res = session.get_instruments_info(category="linear", symbol=symbol)
@@ -178,13 +159,11 @@ def open_martingale_step(symbol, side, step_index):
     prev_avg = symbol_state[symbol]["avg_price"]
     curr_qty = float(formatted_qty)
 
-    if prev_qty > 0:
-        new_avg_price = ((prev_avg * prev_qty) + (close_price * curr_qty)) / (prev_qty + curr_qty)
-    else:
-        new_avg_price = close_price
+    new_avg_price = ((prev_avg * prev_qty) + (close_price * curr_qty)) / (prev_qty + curr_qty) if prev_qty > 0 else close_price
 
-    tp_pct = 0.005  # +0.5% TP
-    sl_pct = 0.004  # -0.4% SL
+    # ДИНАМИКАЛЫҚ TP мен SL (ATR негізінде немесе стандартты пайызбен)
+    tp_pct = 0.005  # +0.5% Take-Profit
+    sl_pct = max(0.003, min((atr_value / close_price) * 1.5, 0.008)) # ATR негізгі стоп-лоссы (0.3% - 0.8% аралығында)
 
     if side == "Buy":
         pos_idx = 1
@@ -195,9 +174,6 @@ def open_martingale_step(symbol, side, step_index):
         tp = new_avg_price * (1 - tp_pct)
         sl = close_price * (1 + sl_pct)
 
-    formatted_tp = format_value(tp, price_step)
-    formatted_sl = format_value(sl, price_step)
-
     try:
         session.set_leverage(category="linear", symbol=symbol, buyLeverage=str(LEVERAGE), sellLeverage=str(LEVERAGE))
     except Exception: pass
@@ -205,86 +181,77 @@ def open_martingale_step(symbol, side, step_index):
     try:
         res = session.place_order(
             category="linear", symbol=symbol, side=side, orderType="Market",
-            qty=formatted_qty, takeProfit=formatted_tp, stopLoss=formatted_sl, positionIdx=pos_idx
+            qty=formatted_qty, takeProfit=format_value(tp, price_step),
+            stopLoss=format_value(sl, price_step), positionIdx=pos_idx
         )
         if res.get('retCode') == 0:
-            direction_name = "LONG" if side == "Buy" else "SHORT"
-            log(f"🔥 [{symbol}] СИГНАЛ БОЙЫНША {direction_name} АШЫЛДЫ! | АДЫМ: {step_index + 1}/{MAX_STEPS} | Маржа: ${margin} USDT")
-            
-            symbol_state[symbol]["step"] = step_index
-            symbol_state[symbol]["active"] = True
-            symbol_state[symbol]["pending_next_step"] = False
-            symbol_state[symbol]["last_price"] = close_price
-            symbol_state[symbol]["avg_price"] = new_avg_price
-            symbol_state[symbol]["total_qty"] += curr_qty
+            log(f"🔥 [{symbol}] PRO ОРДЕР АШЫЛДЫ! Қадам: {step_index + 1}/{MAX_STEPS} | Бағыт: {side} | Маржа: ${margin}")
+            symbol_state[symbol].update({
+                "step": step_index, "active": True, "last_price": close_price,
+                "avg_price": new_avg_price, "total_qty": symbol_state[symbol]["total_qty"] + curr_qty,
+                "entry_side": side
+            })
             return True
     except Exception as e:
-        log(f"Ордер жіберу қатесі: {e}")
+        log(f"Ордер қатесі: {e}")
     return False
 
-def check_last_order_pnl(symbol):
+def check_recent_closed_pnl(symbol):
     try:
         res = session.get_closed_pnl(category="linear", symbol=symbol, limit=1)
         if res.get('retCode') == 0 and res['result']['list']:
             return float(res['result']['list'][0]['closedPnl'])
     except Exception: pass
-    return 0
+    return None
 
 def reset_symbol_state(symbol):
-    symbol_state[symbol]["step"] = 0
-    symbol_state[symbol]["active"] = False
-    symbol_state[symbol]["pending_next_step"] = False
-    symbol_state[symbol]["last_price"] = 0.0
-    symbol_state[symbol]["avg_price"] = 0.0
-    symbol_state[symbol]["total_qty"] = 0.0
+    symbol_state[symbol].update({
+        "step": 0, "active": False, "last_price": 0.0, 
+        "avg_price": 0.0, "total_qty": 0.0, "entry_side": None
+    })
 
 def main():
-    log(f"🚀 ӘРБІР АДЫМДА СИГНАЛ ТЕКСЕРЕТІН МАРТИНГЕЙЛ БОТЫ ІСКЕ ҚОСЫЛДЫ")
+    log(f"🚀 PRO-БОТ (EMA + RSI + BB + MACD + ATR) ІСКЕ ҚОСЫЛДЫ")
     while True:
         try:
-            all_active_positions = get_active_positions()
-            active_symbols = [p['symbol'] for p in all_active_positions]
+            all_active = get_active_positions()
+            active_syms = [p['symbol'] for p in all_active]
 
             for symbol in SYMBOLS:
-                pos = [p for p in all_active_positions if p['symbol'] == symbol]
+                pos = [p for p in all_active if p['symbol'] == symbol]
                 
-                # 1. Егер ашық ордер жабылса
                 if not pos and symbol_state[symbol]["active"]:
-                    last_pnl = check_last_order_pnl(symbol)
+                    last_pnl = check_recent_closed_pnl(symbol)
                     curr_step = symbol_state[symbol]["step"]
                     
-                    if last_pnl > 0:
-                        log(f"✅ [{symbol}] ПЛЮС! PnL: +${round(last_pnl, 2)}. Цикл сәтті аяқталды.")
+                    if last_pnl is not None and last_pnl > 0:
+                        log(f"✅ [{symbol}] ПЛЮСПЕН ЖАБЫЛДЫ! PnL: +${round(last_pnl, 2)}")
                         reset_symbol_state(symbol)
                     else:
                         next_step = curr_step + 1
                         if next_step < MAX_STEPS:
-                            log(f"❌ [{symbol}] МИНУС. {next_step + 1}-адым үшін СИГНАЛ КҮТЕМІЗ (Маржа: ${calculate_margin_for_step(next_step)})...")
+                            log(f"❌ [{symbol}] МИНУС. Келесі {next_step + 1}-адымға дайындық...")
                             symbol_state[symbol]["step"] = next_step
                             symbol_state[symbol]["active"] = False
-                            symbol_state[symbol]["pending_next_step"] = True
+                            symbol_state[symbol]["total_qty"] = 0.0
+                            symbol_state[symbol]["avg_price"] = 0.0
                         else:
-                            log(f"⚠️ [{symbol}] 10 адым таусылды. 1-адымға ораламыз.")
+                            log(f"⚠️ [{symbol}] {MAX_STEPS} адым аяқталды. Цикл бастан басталады.")
                             reset_symbol_state(symbol)
 
-                # 2. Адамдар үшін сигнал күту (Бірінші ордер де, Мартингейл адымдары да СИГНАЛМЕН ашылады)
                 if not pos:
-                    # Егер бұл 1-адым болса, позиция лимитін тексереміз
-                    if symbol_state[symbol]["step"] == 0 and len(active_symbols) >= MAX_OPEN_POSITIONS:
+                    if symbol_state[symbol]["step"] == 0 and len(active_syms) >= MAX_OPEN_POSITIONS:
                         continue
 
-                    # СИГНАЛДЫ ТЕКСЕРУ
-                    signal = analyze_deep_market(symbol)
+                    signal, close_price, atr_val = check_advanced_signal(symbol)
                     if signal != "WAIT":
                         step_num = symbol_state[symbol]["step"]
-                        log(f"🎯 [{symbol}] {step_num + 1}-АДЫМҒА СИГНАЛ ТАБЫЛДЫ: {signal}!")
-                        if open_martingale_step(symbol, signal, step_num):
-                            if symbol not in active_symbols:
-                                active_symbols.append(symbol)
+                        if open_martingale_step(symbol, signal, step_num, close_price, atr_val):
+                            if symbol not in active_syms: active_syms.append(symbol)
 
-            time.sleep(15)
+            time.sleep(10)
         except Exception as e:
-            log(f"Басты цикл қатесі: {e}")
+            log(f"Цикл қатесі: {e}")
             time.sleep(5)
 
 if __name__ == "__main__":
