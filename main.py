@@ -6,31 +6,32 @@ import numpy as np
 from pybit.unified_trading import HTTP
 
 # ==============================================================================
-# ULTRA-FAST & SHARP STOCH-RSI MARTINGALE CONFIG
+# SMART PYRAMIDING (ANTI-MARTINGALE) CONFIG (SOL & ETH ONLY)
 # ==============================================================================
 API_KEY = os.getenv("BYBIT_API_KEY", "")
 API_SECRET = os.getenv("BYBIT_API_SECRET", "")
 IS_DEMO = True
 
-SYMBOLS = ["SOLUSDT", "XRPUSDT", "1000PEPEUSDT", "NEARUSDT", "ETHUSDT"]
+SYMBOLS = ["SOLUSDT", "ETHUSDT"]
 
 LEVERAGE = 15                  
-BASE_MARGIN = 5.0              
-MAX_STEPS = 10                 
-MAX_OPEN_POSITIONS = 3         
-STEP_DISTANCE_PCT = 0.003      # 0.3% адым арақашықтығы
+BASE_MARGIN = 5.0              # Бастапқы маржа ($5)
+MAX_PYRAMID_STEPS = 3          # Тренд бойымен ең көп дегенде 3 рет позиция қосылады
+MAX_OPEN_POSITIONS = 2         # Максималды ашық монета саны
+ADD_STEP_PCT = 0.0035          # Баға +0.35% өскен сайын жаңа қадам қосылады
 
 session = HTTP(testnet=False, api_key=API_KEY, api_secret=API_SECRET, demo=IS_DEMO)
 
 symbol_state = {
     symbol: {
-        "step": 0, "active": False, "last_price": 0.0,
-        "avg_price": 0.0, "total_qty": 0.0, "entry_side": None
+        "step": 0, "active": False, "last_entry_price": 0.0,
+        "avg_price": 0.0, "total_qty": 0.0, "entry_side": None,
+        "stop_loss_price": 0.0
     } for symbol in SYMBOLS
 }
 
 def log(msg):
-    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} [STOCH-BOT] {msg}", flush=True)
+    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} [PYRAMID-BOT] {msg}", flush=True)
 
 def format_value(value, step):
     if step is None or step == 0: return str(value)
@@ -79,8 +80,7 @@ def calc_atr(df, period=14):
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     return tr.rolling(period).mean()
 
-def check_stoch_signal(symbol):
-    # 5 минуттық таймфрейм арқылы өте жиі әрі жылдам сигнал ұстау
+def check_entry_signal(symbol):
     df = get_klines(symbol, interval="5", limit=60)
     if df is None or len(df) < 30: return "WAIT", 0.0, 0.0
 
@@ -95,30 +95,21 @@ def check_stoch_signal(symbol):
     current_close = curr['close']
     current_atr = curr['atr'] if not np.isnan(curr['atr']) else current_close * 0.003
 
-    # Лонг сигналы: EMA 3 жоғарыға қиып өтті + StochRSI төменгі аймақтан (20-дан) жоғарыға бет алды
+    # Лонг сигналы
     if prev['ema3'] <= prev['ema8'] and curr['ema3'] > curr['ema8']:
-        if curr['stoch_k'] < 80:  # Шамадан тыс жоғары болып кетпесе
+        if curr['stoch_k'] < 80:
             return "Buy", current_close, current_atr
 
-    # Шорт сигналы: EMA 3 төменге қиып өтті + StochRSI жоғарғы аймақтан (80-нен) төменге бет алды
+    # Шорт сигналы
     if prev['ema3'] >= prev['ema8'] and curr['ema3'] < curr['ema8']:
-        if curr['stoch_k'] > 20:  # Шамадан тыс төмен құлап кетпесе
+        if curr['stoch_k'] > 20:
             return "Sell", current_close, current_atr
 
     return "WAIT", current_close, current_atr
 
 # ==============================================================================
-# МАРЖА ЖӘНЕ ОРДЕР БАСҚАРУ
+# ОРДЕР БАСҚАРУ ЖӘНЕ ПИРАМИДИНГ
 # ==============================================================================
-def calculate_margin_for_step(step_index):
-    margin = BASE_MARGIN
-    for i in range(step_index):
-        if i < 3: multiplier = 2.0
-        elif i < 6: multiplier = 1.5
-        else: multiplier = 1.2
-        margin *= multiplier
-    return round(margin, 2)
-
 def get_active_positions(symbol=None):
     try:
         res = session.get_positions(category="linear", settleCoin="USDT")
@@ -129,12 +120,7 @@ def get_active_positions(symbol=None):
     except Exception: pass
     return []
 
-def open_martingale_step(symbol, side, step_index, close_price, atr_value):
-    if step_index > 0 and symbol_state[symbol]["last_price"] > 0:
-        last_price = symbol_state[symbol]["last_price"]
-        if abs(close_price - last_price) / last_price < STEP_DISTANCE_PCT:
-            return False
-
+def open_initial_position(symbol, side, close_price, atr_value):
     try:
         res = session.get_instruments_info(category="linear", symbol=symbol)
         info = res['result']['list'][0]
@@ -142,28 +128,22 @@ def open_martingale_step(symbol, side, step_index, close_price, atr_value):
         price_step = float(info['priceFilter']['tickSize'])
     except Exception: return False
 
-    margin = calculate_margin_for_step(step_index)
+    margin = BASE_MARGIN
     position_size_usdt = margin * LEVERAGE
     raw_qty = position_size_usdt / close_price
     formatted_qty = format_value(raw_qty, qty_step)
 
-    prev_qty = symbol_state[symbol]["total_qty"]
-    prev_avg = symbol_state[symbol]["avg_price"]
-    curr_qty = float(formatted_qty)
-
-    new_avg_price = ((prev_avg * prev_qty) + (close_price * curr_qty)) / (prev_qty + curr_qty) if prev_qty > 0 else close_price
-
-    tp_pct = 0.004  # +0.4% Take-Profit
-    sl_pct = max(0.003, min((atr_value / close_price) * 1.2, 0.006)) # Динамикалық ATR Стоп-Лосс
+    sl_dist = max(close_price * 0.003, atr_value * 1.0)
+    tp_dist = sl_dist * 2.5  # Тәуекелге қарағанда пайда 2.5 есе жоғары
 
     if side == "Buy":
         pos_idx = 1
-        tp = new_avg_price * (1 + tp_pct)
-        sl = close_price * (1 - sl_pct)
+        sl = close_price - sl_dist
+        tp = close_price + tp_dist
     else:
         pos_idx = 2
-        tp = new_avg_price * (1 - tp_pct)
-        sl = close_price * (1 + sl_pct)
+        sl = close_price + sl_dist
+        tp = close_price - tp_dist
 
     try:
         session.set_leverage(category="linear", symbol=symbol, buyLeverage=str(LEVERAGE), sellLeverage=str(LEVERAGE))
@@ -176,33 +156,80 @@ def open_martingale_step(symbol, side, step_index, close_price, atr_value):
             stopLoss=format_value(sl, price_step), positionIdx=pos_idx
         )
         if res.get('retCode') == 0:
-            log(f"🔥 [{symbol}] STOCH-RSI ОРДЕР АШЫЛДЫ! Қадам: {step_index + 1}/{MAX_STEPS} | Бағыт: {side} | Маржа: ${margin}")
+            log(f"🚀 [{symbol}] БАСТАПҚЫ ОРДЕР АШЫЛДЫ! Бағыт: {side} | Баға: ${close_price} | SL: ${round(sl, 4)}")
             symbol_state[symbol].update({
-                "step": step_index, "active": True, "last_price": close_price,
-                "avg_price": new_avg_price, "total_qty": symbol_state[symbol]["total_qty"] + curr_qty,
-                "entry_side": side
+                "step": 1, "active": True, "last_entry_price": close_price,
+                "avg_price": close_price, "total_qty": float(formatted_qty),
+                "entry_side": side, "stop_loss_price": sl
             })
             return True
     except Exception as e:
-        log(f"Ордер қатесі: {e}")
+        log(f"Бастапқы ордер қатесі: {e}")
     return False
 
-def check_recent_closed_pnl(symbol):
+def add_pyramid_step(symbol, side, current_price):
+    state = symbol_state[symbol]
+    if state["step"] >= MAX_PYRAMID_STEPS:
+        return
+
+    last_price = state["last_entry_price"]
+    
+    # Тек баға біздің пайдамызға қарай жүрсе ғана жаңа қадам қосылады
+    if side == "Buy" and (current_price - last_price) / last_price < ADD_STEP_PCT:
+        return
+    if side == "Sell" and (last_price - current_price) / last_price < ADD_STEP_PCT:
+        return
+
     try:
-        res = session.get_closed_pnl(category="linear", symbol=symbol, limit=1)
-        if res.get('retCode') == 0 and res['result']['list']:
-            return float(res['result']['list'][0]['closedPnl'])
-    except Exception: pass
-    return None
+        res = session.get_instruments_info(category="linear", symbol=symbol)
+        info = res['result']['list'][0]
+        qty_step = float(info['lotSizeFilter']['qtyStep'])
+        price_step = float(info['priceFilter']['tickSize'])
+    except Exception: return
+
+    margin = BASE_MARGIN * (1 + (state["step"] * 0.5)) # Маржаны сәл өсіру
+    position_size_usdt = margin * LEVERAGE
+    raw_qty = position_size_usdt / current_price
+    formatted_qty = format_value(raw_qty, qty_step)
+
+    prev_qty = state["total_qty"]
+    prev_avg = state["avg_price"]
+    curr_qty = float(formatted_qty)
+    new_total_qty = prev_qty + curr_qty
+    new_avg_price = ((prev_avg * prev_qty) + (current_price * curr_qty)) / new_total_qty
+
+    # Стоп-лосс-ты ескі кірген бағаға жылжытамыз (Break-even — Тәуекелсіз зона)
+    new_sl = prev_avg if side == "Buy" else prev_avg
+    pos_idx = 1 if side == "Buy" else 2
+
+    try:
+        res = session.place_order(
+            category="linear", symbol=symbol, side=side, orderType="Market",
+            qty=formatted_qty, positionIdx=pos_idx
+        )
+        if res.get('retCode') == 0:
+            session.trading_stop(
+                category="linear", symbol=symbol,
+                stopLoss=format_value(new_sl, price_step), positionIdx=pos_idx
+            )
+            log(f"🔥 [{symbol}] ПИРАМИДИНГ ҚАДАМЫ ҚОСЫЛДЫ! Қадам: {state['step'] + 1}/{MAX_PYRAMID_STEPS} | Жаңа SL: ${round(new_sl, 4)}")
+            state.update({
+                "step": state["step"] + 1, "last_entry_price": current_price,
+                "avg_price": new_avg_price, "total_qty": new_total_qty,
+                "stop_loss_price": new_sl
+            })
+    except Exception as e:
+        log(f"Пирамидинг ордер қатесі: {e}")
 
 def reset_symbol_state(symbol):
     symbol_state[symbol].update({
-        "step": 0, "active": False, "last_price": 0.0, 
-        "avg_price": 0.0, "total_qty": 0.0, "entry_side": None
+        "step": 0, "active": False, "last_entry_price": 0.0,
+        "avg_price": 0.0, "total_qty": 0.0, "entry_side": None,
+        "stop_loss_price": 0.0
     })
 
 def main():
-    log(f"🚀 STOCH-RSI PRO-БОТ ІСКЕ ҚОСЫЛДЫ (Жиі әрі дәл сауда)")
+    log(f"🚀 АҚЫЛДЫ ПИРАМИДИНГ БОТЫ ІСКЕ ҚОСЫЛДЫ (SOL & ETH)")
     while True:
         try:
             all_active = get_active_positions()
@@ -211,34 +238,27 @@ def main():
             for symbol in SYMBOLS:
                 pos = [p for p in all_active if p['symbol'] == symbol]
                 
+                # Егер позиция жабылған болса (TP немесе SL орындалды)
                 if not pos and symbol_state[symbol]["active"]:
-                    last_pnl = check_recent_closed_pnl(symbol)
-                    curr_step = symbol_state[symbol]["step"]
-                    
-                    if last_pnl is not None and last_pnl > 0:
-                        log(f"✅ [{symbol}] ПЛЮСПЕН ЖАБЫЛДЫ! PnL: +${round(last_pnl, 2)}")
-                        reset_symbol_state(symbol)
-                    else:
-                        next_step = curr_step + 1
-                        if next_step < MAX_STEPS:
-                            log(f"❌ [{symbol}] МИНУС. Келесі {next_step + 1}-адымға дайындық...")
-                            symbol_state[symbol]["step"] = next_step
-                            symbol_state[symbol]["active"] = False
-                            symbol_state[symbol]["total_qty"] = 0.0
-                            symbol_state[symbol]["avg_price"] = 0.0
-                        else:
-                            log(f"⚠️ [{symbol}] {MAX_STEPS} адым аяқталды. Цикл бастан басталады.")
-                            reset_symbol_state(symbol)
+                    log(f"🏁 [{symbol}] Позиция жабылды! Жаңа циклге дайындық...")
+                    reset_symbol_state(symbol)
 
+                # Егер активті позиция жоқ болса — жаңа сигнал күтеміз
                 if not pos:
-                    if symbol_state[symbol]["step"] == 0 and len(active_syms) >= MAX_OPEN_POSITIONS:
+                    if len(active_syms) >= MAX_OPEN_POSITIONS:
                         continue
 
-                    signal, close_price, atr_val = check_stoch_signal(symbol)
+                    signal, close_price, atr_val = check_entry_signal(symbol)
                     if signal != "WAIT":
-                        step_num = symbol_state[symbol]["step"]
-                        if open_martingale_step(symbol, signal, step_num, close_price, atr_val):
+                        if open_initial_position(symbol, signal, close_price, atr_val):
                             if symbol not in active_syms: active_syms.append(symbol)
+
+                # Егер позиция бар болса — Пирамидинг қадамын тексереміз
+                else:
+                    curr_price = float(pos[0]['markPrice'])
+                    side = symbol_state[symbol]["entry_side"]
+                    if side:
+                        add_pyramid_step(symbol, side, curr_price)
 
             time.sleep(5)
         except Exception as e:
