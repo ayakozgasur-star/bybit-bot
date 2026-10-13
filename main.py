@@ -97,7 +97,6 @@ def run_bot():
                 is_downtrend = current_price < curr['ema200'] # Төмен тренд
 
                 # 3. PRICE ACTION / PIN BAR & BOLLINGER REJECTION ЛОГИКАСЫ
-                # Свечаның құрылымын есептейміз
                 body_size = abs(curr['close'] - curr['open'])
                 total_range = curr['high'] - curr['low']
                 
@@ -107,7 +106,7 @@ def run_bot():
                 lower_wick = min(curr['open'], curr['close']) - curr['low']
                 upper_wick = curr['high'] - max(curr['open'], curr['close'])
 
-                # Лонг үшін Pin Bar (Төменгі wick ұзын, денесі кішкентай, және баға төменгі Bollinger арнасына тиіп/шығып кеткен)
+                # Лонг үшін Pin Bar (Төменгі wick ұзын, денесі кішкентай, баға Bollinger арнасының шетіне тиіп қайтты)
                 long_pinbar = (
                     is_uptrend and
                     (curr['low'] <= curr['bb_low'] or lower_wick >= total_range * 0.5) and
@@ -115,7 +114,7 @@ def run_bot():
                     (curr['close'] > curr['open'])     # Жасыл свеча
                 )
 
-                # Шорт үшін Pin Bar (Жоғарғы wick ұзын, денесі кішкентай, және баға жоғарғы Bollinger арнасына тиіп/шығып кеткен)
+                # Шорт үшін Pin Bar (Жоғарғы wick ұзын, денесі кішкентай, баға Bollinger арнасының шетіне тиіп қайтты)
                 short_pinbar = (
                     is_downtrend and
                     (curr['high'] >= curr['bb_high'] or upper_wick >= total_range * 0.5) and
