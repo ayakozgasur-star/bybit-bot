@@ -14,14 +14,14 @@ IS_DEMO = True
 
 SYMBOLS = ["SOLUSDT", "ETHUSDT"]
 CATEGORY = "linear"
-LEVERAGE = 20        # Левередж 20x
-BASE_MARGIN = 5.0    # Әр саудаға тігілетін маржа ($5)
 
-# НАСТРОЙКАЛАР (Скалпинг үшін)
-STOP_LOSS_PCT = 0.0025   # Стоп-Лосс: -0.25%
-TAKE_PROFIT_PCT = 0.009  # Тейк-Профит: +0.9%
+# СІЗ СҰРАҒАН ЖАҢА ПАРАМЕТРЛЕР:
+LEVERAGE = 25          # Левередж 25x
+BASE_MARGIN = 20.0     # Маржа $20
+TAKE_PROFIT_PCT = 0.004  # Тейк-Профит: +0.4%
+STOP_LOSS_PCT = 0.003    # Стоп-Лосс: -0.3%
 
-# Unified Trading Demo режиміне арналған дұрыс қосылым
+# Unified Trading Demo режиміне арналған қосылым
 session = HTTP(testnet=False, api_key=API_KEY, api_secret=API_SECRET, demo=IS_DEMO)
 
 def log(msg):
@@ -59,7 +59,6 @@ def get_active_positions(symbol):
 
 def open_scalp_order(symbol, side, current_price):
     try:
-        # Инструмент шектеулерін алу
         res = session.get_instruments_info(category=CATEGORY, symbol=symbol)
         info = res['result']['list'][0]
         qty_step = float(info['lotSizeFilter']['qtyStep'])
@@ -70,7 +69,6 @@ def open_scalp_order(symbol, side, current_price):
 
     raw_qty = (BASE_MARGIN * LEVERAGE) / current_price
     
-    # Qty шагқа сәйкестендіру
     step_str = f"{qty_step:.8f}".rstrip('0')
     precision = len(step_str.split('.')[1]) if '.' in step_str else 0
     qty = round(raw_qty, precision)
@@ -98,12 +96,12 @@ def open_scalp_order(symbol, side, current_price):
             positionIdx=pos_idx
         )
         if order.get('retCode') == 0:
-            log(f"✅ [{symbol}] 20x WICK/PINBAR ДЕМО ОРДЕРІ АШЫЛДЫ: {side} | Баға: {current_price} | TP: {tp_price} | SL: {sl_price}")
+            log(f"✅ [{symbol}] ОРДЕР АШЫЛДЫ: {side} | Маржа: ${BASE_MARGIN} | Левередж: {LEVERAGE}x | TP: {tp_price} | SL: {sl_price}")
     except Exception as e:
         log(f"Ордер ашу қатесі ({symbol}): {e}")
 
 def run_bot():
-    log(f"🚀 Скальпинг Бот іске қосылды (Demo режим, EMA 200 + Pin Bar / Bollinger)...")
+    log(f"🚀 Скальпинг Бот жаңа баптаулармен іске қосылды (Маржа: $20, Левередж: 25x, TP: 0.4%, SL: 0.3%)...")
     for symbol in SYMBOLS:
         set_leverage(symbol)
 
@@ -118,7 +116,6 @@ def run_bot():
                 if df is None or len(df) < 220:
                     continue
                 
-                # Индикаторлар: EMA 200 және Bollinger Bands
                 df['ema200'] = ta.trend.ema_indicator(df['close'], window=200)
                 
                 indicator_bb = ta.volatility.BollingerBands(close=df['close'], window=20, window_dev=2)
@@ -128,11 +125,9 @@ def run_bot():
                 curr = df.iloc[-1]
                 current_price = curr['close']
 
-                # Тренд сүзгісі
                 is_uptrend = current_price > curr['ema200']
                 is_downtrend = current_price < curr['ema200']
 
-                # Price Action / Pin Bar & Bollinger Rejection логикасы
                 body_size = abs(curr['close'] - curr['open'])
                 total_range = curr['high'] - curr['low']
                 
