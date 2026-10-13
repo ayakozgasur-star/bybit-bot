@@ -4,12 +4,14 @@ import pandas as pd
 import ta
 from pybit.unified_trading import HTTP
 
-# API кілттерді орнату
+# API кілттерді орнату (Railway Variables-тен алады)
 API_KEY = os.environ.get("BYBIT_API_KEY")
 API_SECRET = os.environ.get("BYBIT_API_SECRET")
 
+# Testnet үшін ресми endpoint мекенжайын тікелей көрсетеміз
 session = HTTP(
-    testnet=True, # Демо-шот үшін True (Нақты шотқа ауысқанда False)
+    testnet=True,
+    endpoint="https://api-testnet.bybit.com",
     api_key=API_KEY,
     api_secret=API_SECRET
 )
@@ -19,7 +21,7 @@ CATEGORY = "linear"
 LEVERAGE = 20        # Левередж 20x
 BASE_MARGIN = 5.0    # Әр саудаға тігілетін маржа ($5)
 
-# НАСТРОЙКАЛАР
+# НАСТРОЙКАЛАР (Скалпинг үшін)
 STOP_LOSS_PCT = 0.0025   # Стоп-Лосс: -0.25%
 TAKE_PROFIT_PCT = 0.009  # Тейк-Профит: +0.9%
 
@@ -30,9 +32,10 @@ def set_leverage(symbol):
         pass
 
 def get_klines(symbol, interval="3"):
-    res = session.get_kline(category=CATEGORY, symbol=symbol, interval=interval, limit=50)
+    res = session.get_kline(category=CATEGORY, symbol=symbol, interval=interval, limit=250)
     df = pd.DataFrame(res['result']['list'], columns=['time', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
-    df['close'] = df['close'].astype(float)
+    for col in ['open', 'high', 'low', 'close', 'volume']:
+        df[col] = df[col].astype(float)
     df = df.iloc[::-1].reset_index(drop=True)
     return df
 
@@ -64,10 +67,10 @@ def open_scalp_order(symbol, side, current_price):
         stopLoss=str(sl_price),
         takeProfit=str(tp_price)
     )
-    print(f"✅ [{symbol}] 20x ОРДЕР АШЫЛДЫ (EMA + StochRSI): {side} | Баға: {current_price} | TP: {tp_price} | SL: {sl_price}")
+    print(f"✅ [{symbol}] 20x WICK/PINBAR ДЕМО ОРДЕРІ АШЫЛДЫ: {side} | Баға: {current_price} | TP: {tp_price} | SL: {sl_price}")
 
 def run_bot():
-    print("🚀 Скальпинг Бот іске қосылды (20x, EMA + StochRSI фильтрі)...")
+    print("🚀 Скальпинг Бот іске қосылды (Testnet URL бекітілді, EMA 200 + Pin Bar)...")
     for symbol in SYMBOLS:
         set_leverage(symbol)
 
@@ -75,32 +78,49 @@ def run_bot():
         try:
             for symbol in SYMBOLS:
                 positions = get_active_positions(symbol)
-                
                 if len(positions) > 0:
                     continue
 
                 df = get_klines(symbol)
                 
-                # Индикаторлар: EMA және StochRSI
-                df['ema3'] = ta.trend.ema_indicator(df['close'], window=3)
-                df['ema8'] = ta.trend.ema_indicator(df['close'], window=8)
+                df['ema200'] = ta.trend.ema_indicator(df['close'], window=200)
                 
-                stoch_rsi = ta.momentum.StochRSIIndicator(close=df['close'], window=14, smooth1=3, smooth2=3)
-                df['stoch_k'] = stoch_rsi.stochrsi_k()
+                indicator_bb = ta.volatility.BollingerBands(close=df['close'], window=20, window_dev=2)
+                df['bb_high'] = indicator_bb.bollinger_hband()
+                df['bb_low'] = indicator_bb.bollinger_lband()
                 
-                last = df.iloc[-1]
-                prev = df.iloc[-2]
-                current_price = last['close']
+                curr = df.iloc[-1]
+                current_price = curr['close']
 
-                # Лонг сигнал: EMA қиылысуы ЖӘНЕ StochRSI шамадан тыс жоғары емес (< 0.8)
-                long_signal = (prev['ema3'] <= prev['ema8'] and last['ema3'] > last['ema8']) and (last['stoch_k'] < 0.8)
-                
-                # Шорт сигнал: EMA қиылысуы ЖӘНЕ StochRSI шамадан тыс төмен емес (> 0.2)
-                short_signal = (prev['ema3'] >= prev['ema8'] and last['ema3'] < last['ema8']) and (last['stoch_k'] > 0.2)
+                is_uptrend = current_price > curr['ema200']
+                is_downtrend = current_price < curr['ema200']
 
-                if long_signal:
+                body_size = abs(curr['close'] - curr['open'])
+                total_range = curr['high'] - curr['low']
+                
+                if total_range == 0:
+                    continue
+
+                lower_wick = min(curr['open'], curr['close']) - curr['low']
+                upper_wick = curr['high'] - max(curr['open'], curr['close'])
+
+                long_pinbar = (
+                    is_uptrend and
+                    (curr['low'] <= curr['bb_low'] or lower_wick >= total_range * 0.5) and
+                    (lower_wick >= body_size * 2) and
+                    (curr['close'] > curr['open'])
+                )
+
+                short_pinbar = (
+                    is_downtrend and
+                    (curr['high'] >= curr['bb_high'] or upper_wick >= total_range * 0.5) and
+                    (upper_wick >= body_size * 2) and
+                    (curr['close'] < curr['open'])
+                )
+
+                if long_pinbar:
                     open_scalp_order(symbol, "Buy", current_price)
-                elif short_signal:
+                elif short_pinbar:
                     open_scalp_order(symbol, "Sell", current_price)
 
             time.sleep(10)
