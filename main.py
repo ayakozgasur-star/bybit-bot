@@ -4,12 +4,13 @@ import pandas as pd
 import ta
 from pybit.unified_trading import HTTP
 
-# API кілттерді орнату
+# API кілттерді орнату (Railway Variables-тен алады)
 API_KEY = os.environ.get("BYBIT_API_KEY")
 API_SECRET = os.environ.get("BYBIT_API_SECRET")
 
+# Демо (Testnet) үшін арнайы қосылым (401 қатесі шықпас үшін testnet=True және дұрыс баптау)
 session = HTTP(
-    testnet=True, # Демо-шот үшін True (Нақты шотқа ауысқанда False)
+    testnet=True,
     api_key=API_KEY,
     api_secret=API_SECRET
 )
@@ -30,7 +31,7 @@ def set_leverage(symbol):
         pass
 
 def get_klines(symbol, interval="3"):
-    # EMA 200 және Bollinger Bands үшін limit-ті 250-ге қоямыз
+    # EMA 200 және Bollinger Bands үшін limit 250
     res = session.get_kline(category=CATEGORY, symbol=symbol, interval=interval, limit=250)
     df = pd.DataFrame(res['result']['list'], columns=['time', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
     for col in ['open', 'high', 'low', 'close', 'volume']:
@@ -66,10 +67,10 @@ def open_scalp_order(symbol, side, current_price):
         stopLoss=str(sl_price),
         takeProfit=str(tp_price)
     )
-    print(f"✅ [{symbol}] 20x WICK/PINBAR ОРДЕРІ АШЫЛДЫ: {side} | Баға: {current_price} | TP: {tp_price} | SL: {sl_price}")
+    print(f"✅ [{symbol}] 20x WICK/PINBAR ДЕМО ОРДЕРІ АШЫЛДЫ: {side} | Баға: {current_price} | TP: {tp_price} | SL: {sl_price}")
 
 def run_bot():
-    print("🚀 Скальпинг Бот іске қосылды (EMA 200 Тренд + Pin Bar / Bollinger Rejection)...")
+    print("🚀 Скальпинг Бот іске қосылды (Testnet Demo режимі, EMA 200 + Pin Bar / Bollinger)...")
     for symbol in SYMBOLS:
         set_leverage(symbol)
 
@@ -82,7 +83,7 @@ def run_bot():
 
                 df = get_klines(symbol)
                 
-                # 1. Индикаторлар: EMA 200 (Тренд үшін) және Bollinger Bands (Шеткі нүктелер үшін)
+                # Индикаторлар: EMA 200 және Bollinger Bands
                 df['ema200'] = ta.trend.ema_indicator(df['close'], window=200)
                 
                 indicator_bb = ta.volatility.BollingerBands(close=df['close'], window=20, window_dev=2)
@@ -92,11 +93,11 @@ def run_bot():
                 curr = df.iloc[-1]
                 current_price = curr['close']
 
-                # 2. ТРЕНД СҮЗГІСІ
-                is_uptrend = current_price > curr['ema200']   # Жоғары тренд
-                is_downtrend = current_price < curr['ema200'] # Төмен тренд
+                # Тренд сүзгісі
+                is_uptrend = current_price > curr['ema200']
+                is_downtrend = current_price < curr['ema200']
 
-                # 3. PRICE ACTION / PIN BAR & BOLLINGER REJECTION ЛОГИКАСЫ
+                # Price Action / Pin Bar & Bollinger Rejection логикасы
                 body_size = abs(curr['close'] - curr['open'])
                 total_range = curr['high'] - curr['low']
                 
@@ -106,20 +107,18 @@ def run_bot():
                 lower_wick = min(curr['open'], curr['close']) - curr['low']
                 upper_wick = curr['high'] - max(curr['open'], curr['close'])
 
-                # Лонг үшін Pin Bar (Төменгі wick ұзын, денесі кішкентай, баға Bollinger арнасының шетіне тиіп қайтты)
                 long_pinbar = (
                     is_uptrend and
                     (curr['low'] <= curr['bb_low'] or lower_wick >= total_range * 0.5) and
-                    (lower_wick >= body_size * 2) and  # Құйрық денеден кем дегенде 2 есе үлкен
-                    (curr['close'] > curr['open'])     # Жасыл свеча
+                    (lower_wick >= body_size * 2) and
+                    (curr['close'] > curr['open'])
                 )
 
-                # Шорт үшін Pin Bar (Жоғарғы wick ұзын, денесі кішкентай, баға Bollinger арнасының шетіне тиіп қайтты)
                 short_pinbar = (
                     is_downtrend and
                     (curr['high'] >= curr['bb_high'] or upper_wick >= total_range * 0.5) and
-                    (upper_wick >= body_size * 2) and  # Құйрық денеден кем дегенде 2 есе үлкен
-                    (curr['close'] < curr['open'])     # Қызыл свеча
+                    (upper_wick >= body_size * 2) and
+                    (curr['close'] < curr['open'])
                 )
 
                 if long_pinbar:
