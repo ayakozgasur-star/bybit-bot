@@ -8,10 +8,9 @@ from pybit.unified_trading import HTTP
 API_KEY = os.environ.get("BYBIT_API_KEY")
 API_SECRET = os.environ.get("BYBIT_API_SECRET")
 
-# Testnet үшін ресми endpoint мекенжайын тікелей көрсетеміз
+# Демо режим (testnet=True арқылы Bybit Testnet серверіне қосылады)
 session = HTTP(
     testnet=True,
-    endpoint="https://api-testnet.bybit.com",
     api_key=API_KEY,
     api_secret=API_SECRET
 )
@@ -70,7 +69,7 @@ def open_scalp_order(symbol, side, current_price):
     print(f"✅ [{symbol}] 20x WICK/PINBAR ДЕМО ОРДЕРІ АШЫЛДЫ: {side} | Баға: {current_price} | TP: {tp_price} | SL: {sl_price}")
 
 def run_bot():
-    print("🚀 Скальпинг Бот іске қосылды (Testnet URL бекітілді, EMA 200 + Pin Bar)...")
+    print("🚀 Скальпинг Бот іске қосылды (Testnet Demo режимі, EMA 200 + Pin Bar / Bollinger)...")
     for symbol in SYMBOLS:
         set_leverage(symbol)
 
@@ -83,6 +82,7 @@ def run_bot():
 
                 df = get_klines(symbol)
                 
+                # Индикаторлар: EMA 200 және Bollinger Bands
                 df['ema200'] = ta.trend.ema_indicator(df['close'], window=200)
                 
                 indicator_bb = ta.volatility.BollingerBands(close=df['close'], window=20, window_dev=2)
@@ -92,9 +92,11 @@ def run_bot():
                 curr = df.iloc[-1]
                 current_price = curr['close']
 
+                # Тренд сүзгісі
                 is_uptrend = current_price > curr['ema200']
                 is_downtrend = current_price < curr['ema200']
 
+                # Price Action / Pin Bar & Bollinger Rejection логикасы
                 body_size = abs(curr['close'] - curr['open'])
                 total_range = curr['high'] - curr['low']
                 
