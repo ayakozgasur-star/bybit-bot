@@ -1,3 +1,4 @@
-pybit
 pandas
 numpy
+ta
+pybit
