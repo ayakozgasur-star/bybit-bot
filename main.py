@@ -9,7 +9,7 @@ import pandas as pd
 from pybit.unified_trading import HTTP
 
 # ==============================================================================
-# SCALP BOT v3: КӨБІРЕК СИГНАЛ, КӨБІРЕК СИМВОЛ, ҚАУІПСІЗ ОРДЕР БАСҚАРУ
+# SCALP BOT v3 (ТАЗАЛАНҒАН ЖӘНЕ ШЕКТЕУСІЗ НҰСҚА)
 # ==============================================================================
 API_KEY = os.getenv("BYBIT_API_KEY", "")
 API_SECRET = os.getenv("BYBIT_API_SECRET", "")
@@ -20,14 +20,13 @@ SYMBOLS = ["SOLUSDT", "ETHUSDT", "XRPUSDT", "DOGEUSDT", "BTCUSDT"]
 LEVERAGE = 15
 MAX_RISK_USDT = 1.0          # Бір сделкадағы тәуекел ($)
 MAX_OPEN_POSITIONS = 2       # Бір уақытта ашық позиция саны
-DAILY_LOSS_LIMIT = 4.0       # Күндік шығын лимиті ($), асса жаңа кіру тоқтайды
 
-MIN_ATR_PCT = 0.0012         # ATR/баға осыдан төмен болса (өлі нарық) кірмейміз
+MIN_ATR_PCT = 0.0012         # Өлі нарықты сүзетін ATR шегі
 SL_MIN_PCT = 0.004
 SL_ATR_MULT = 1.2
 TP_RR = 2.5
 
-ENTRY_TIMEOUT_SEC = 30       # Орындалмаған limit ордерді жою уақыты (секунд)
+ENTRY_TIMEOUT_SEC = 30       # Limit ордердің орындалу уақыты (секунд)
 COOLDOWN_WIN_CANDLES = 1
 COOLDOWN_LOSS_CANDLES = 3
 
@@ -36,7 +35,7 @@ BREAK_EVEN_LOCK_PCT = 0.001
 TRAILING_OFFSET_PCT = 0.003
 SL_UPDATE_THRESHOLD_PCT = 0.0004
 
-MAX_PYRAMID_STEPS = 3        # Пирамидинг тек break-even қосылғаннан кейін
+MAX_PYRAMID_STEPS = 3        # Пирамидинг қадамдары
 ADD_STEP_PCT = 0.004
 PYRAMID_SIZE_RATIO = 0.5
 
@@ -56,11 +55,10 @@ symbol_state = {
 }
 
 _info_cache = {}
-_pnl_cache = {"t": 0.0, "v": 0.0}
 
 
 def log(msg):
-    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} [BOT-v3] {msg}", flush=True)
+    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} [BOT-CLEAN] {msg}", flush=True)
 
 
 # ------------------------------------------------------------------------------
@@ -150,7 +148,7 @@ def calc_atr(df, n=14):
 
 
 # ------------------------------------------------------------------------------
-# Сигнал логикасы: 3 түрлі кіру стратегиясы
+# Сигнал логикасы
 # ------------------------------------------------------------------------------
 def check_entry_signal(symbol):
     df = get_klines(symbol, "5", 220)
@@ -168,7 +166,7 @@ def check_entry_signal(symbol):
     df["atr"] = calc_atr(df)
     df["vol_ma"] = df["volume"].rolling(20).mean()
 
-    cur, prev = df.iloc[-2], df.iloc[-3]   # Жабылған шамдар
+    cur, prev = df.iloc[-2], df.iloc[-3]
     price = df.iloc[-1]["close"]
     if np.isnan(cur["atr"]) or np.isnan(cur["stoch"]) or np.isnan(cur["vol_ma"]):
         return None
@@ -203,33 +201,7 @@ def check_entry_signal(symbol):
     return None
 
 
-# ------------------------------------------------------------------------------
-# Күндік лимит және CSV журнал
-# ------------------------------------------------------------------------------
-def daily_pnl():
-    if time.time() - _pnl_cache["t"] < 60:
-        return _pnl_cache["v"]
-    try:
-        start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-        res = session.get_closed_pnl(category="linear", startTime=int(start.timestamp() * 1000), limit=100)
-        if res.get("retCode") == 0:
-            _pnl_cache["v"] = sum(float(r["closedPnl"]) for r in res["result"]["list"])
-            _pnl_cache["t"] = time.time()
-    except Exception as e:
-        log(f"PnL оқу қатесі: {e}")
-    return _pnl_cache["v"]
-
-
-def trading_allowed():
-    pnl = daily_pnl()
-    if pnl <= -DAILY_LOSS_LIMIT:
-        log(f"⛔ Күндік лимит: {pnl:.2f}$. Жаңа кіру жоқ.")
-        return False
-    return True
-
-
 def log_closed_trade(symbol):
-    """Жабылған соңғы сделканы CSV-ға жазады, PnL қайтарады."""
     try:
         res = session.get_closed_pnl(category="linear", symbol=symbol, limit=1)
         if res.get("retCode") == 0 and res["result"]["list"]:
@@ -242,7 +214,6 @@ def log_closed_trade(symbol):
                     w.writerow(["time", "symbol", "side", "entry", "exit", "qty", "pnl"])
                 w.writerow([datetime.now().isoformat(timespec="seconds"), symbol, r.get("side"),
                             r.get("avgEntryPrice"), r.get("avgExitPrice"), r.get("qty"), pnl])
-            _pnl_cache["t"] = 0.0
             return pnl
     except Exception as e:
         log(f"CSV жазу қатесі: {e}")
@@ -250,7 +221,7 @@ def log_closed_trade(symbol):
 
 
 # ------------------------------------------------------------------------------
-# Кіру: Post-Only limit
+# Ордер ашу және басқару
 # ------------------------------------------------------------------------------
 def open_initial_position(symbol, side, atr):
     info = get_info(symbol)
@@ -267,8 +238,6 @@ def open_initial_position(symbol, side, atr):
 
     if qty < info["min_qty"]:
         qty = info["min_qty"]
-        if qty * sl_dist > MAX_RISK_USDT * 1.5:
-            return False
     if qty * entry < info["min_notional"]:
         return False
 
@@ -293,7 +262,6 @@ def open_initial_position(symbol, side, atr):
             st["pending_time"] = time.time()
             log(f"📝 [{symbol}] {side} limit қойылды @ {entry} | SL {sl:.4f} | TP {tp:.4f}")
             return True
-        log(f"[{symbol}] Ордер қатесі: {res.get('retMsg')}")
     except Exception as e:
         log(f"[{symbol}] Ордер қатесі: {e}")
     return False
@@ -320,9 +288,6 @@ def handle_pending(symbol):
     return True
 
 
-# ------------------------------------------------------------------------------
-# Позицияны басқару
-# ------------------------------------------------------------------------------
 def sync_state(symbol, pos):
     st = symbol_state[symbol]
     avg, size = float(pos["avgPrice"]), float(pos["size"])
@@ -340,8 +305,7 @@ def set_sl(symbol, idx, new_sl, tick):
         r = session.trading_stop(category="linear", symbol=symbol,
                                  stopLoss=format_price(new_sl, tick), positionIdx=idx)
         return r.get("retCode") == 0
-    except Exception as e:
-        log(f"[{symbol}] SL қатесі: {e}")
+    except Exception:
         return False
 
 
@@ -384,10 +348,8 @@ def manage_position(symbol, pos):
                     st["step"] += 1
                     st["last_entry_price"] = price
                     log(f"🔥 [{symbol}] ПИРАМИДИНГ {st['step']}/{MAX_PYRAMID_STEPS}")
-                else:
-                    log(f"[{symbol}] Пирамидинг қатесі: {r.get('retMsg')}")
-            except Exception as e:
-                log(f"[{symbol}] Пирамидинг қатесі: {e}")
+            except Exception:
+                pass
 
 
 def on_position_closed(symbol):
@@ -400,21 +362,18 @@ def on_position_closed(symbol):
                "cooldown_until": time.time() + candles * CANDLE_SEC})
 
 
-# ------------------------------------------------------------------------------
-# Негізгі цикл
-# ------------------------------------------------------------------------------
 def get_active_positions():
     try:
         res = session.get_positions(category="linear", settleCoin="USDT")
         if res.get("retCode") == 0:
             return [p for p in res["result"]["list"] if float(p["size"]) > 0]
-    except Exception as e:
-        log(f"Позиция оқу қатесі: {e}")
+    except Exception:
+        pass
     return None
 
 
 def main():
-    log("🚀 SCALP BOT v3 ІСКЕ ҚОСЫЛДЫ")
+    log("🚀 SCALP BOT v3 ТАЗА ЖӘНЕ БЕЛСЕНДІ НҰСҚАДА ІСКЕ ҚОСЫЛДЫ")
     setup_exchange_modes()
 
     while True:
@@ -451,9 +410,6 @@ def main():
                 if st["last_candle"] == boundary or time.time() % CANDLE_SEC < 3:
                     continue
                 st["last_candle"] = boundary
-
-                if not trading_allowed():
-                    continue
 
                 sig = check_entry_signal(symbol)
                 if sig and open_initial_position(symbol, sig[0], sig[2]):
