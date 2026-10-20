@@ -1,16 +1,13 @@
-import csv
 import logging
-import math
 import os
 import sys
 import time
 from datetime import datetime, timezone
-import numpy as np
 import pandas as pd
 from pybit.unified_trading import HTTP
 
 # ==============================================================================
-# 1. ЛОГТАУ ЖӘНЕ КАЗАЛАУ (LOGGING SETUP)
+# 1. ЛОГТАУ СИСТЕМАСЫ (LOGGING SETUP)
 # ==============================================================================
 logging.basicConfig(
     level=logging.INFO,
@@ -22,36 +19,34 @@ logging.basicConfig(
 )
 
 # ==============================================================================
-# 2. КОНФИГУРАЦИЯ (CONFIGURATIONS)
+# 2. КОНФИГУРАЦИЯ ЖӘНЕ БАПТАУЛАР (CONFIGURATIONS)
 # ==============================================================================
-# API Кілттерді оқу (Environment Variables арқылы немесе осы жерге кірістіріңіз)
-API_KEY = os.getenv("BYBIT_API_KEY", "СІЗДІҢ_API_KEY")
-API_SECRET = os.getenv("BYBIT_API_SECRET", "СІЗДІҢ_API_SECRET")
+# API Кілттер (Орта айнымалыларынан оқылады немесе тырнақша ішіне жазыңыз)
+API_KEY = os.getenv("BYBIT_API_KEY", "СІЗДІҢ_BYBIT_DEMO_API_KEY")
+API_SECRET = os.getenv("BYBIT_API_SECRET", "СІЗДІҢ_BYBIT_DEMO_API_SECRET")
 
 # Баптаулар
-IS_DEMO = False  # Тікелей нақты шот (Live) үшін False, Тест шот үшін True
 SYMBOL = "BTCUSDT"
-CATEGORY = "linear"  # USDT Perps
+CATEGORY = "linear"  # USDT Futures / Perpetual
 TIMEFRAME = "5"  # 5 минуттық таймфрейм
 
 LEVERAGE = 10  # 10x Плечо
 TOTAL_DEPOSIT = 1000.0  # $1000 USDT
-RISK_PER_TRADE_USD = 10.0  # Депозиттің 1%-ы = $10
-POSITION_MARGIN_USD = 100.0  # Позицияға бөлінетін сома (Margin)
+POSITION_MARGIN_USD = 200.0  # Позицияға бөлінетін сома ($200 USDT -> 2% Тәуекел)
 
-# Тәуекел пайыздары
-STOP_LOSS_PCT = 0.010  # 1.0% Stop Loss
-TAKE_PROFIT_PCT = 0.020  # 2.0% Take Profit (Take 1:2 Risk/Reward)
+# Тәуекел және Пайда пайыздары
+STOP_LOSS_PCT = 0.010  # 1.0% Stop Loss ($20 USDT)
+TAKE_PROFIT_PCT = 0.020  # 2.0% Take Profit ($40 USDT) -> R:R 1:2
 
-# HTTP Сессия
-session = HTTP(testnet=IS_DEMO, api_key=API_KEY, api_secret=API_SECRET)
+# Bybit Demo Trading HTTP Сессиясы
+session = HTTP(demo=True, api_key=API_KEY, api_secret=API_SECRET)
 
 
 # ==============================================================================
 # 3. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (HELPERS)
 # ==============================================================================
 def set_leverage_and_mode(symbol, leverage):
-  """Левередж бен режимді орнату (Қателерден қорғалған)"""
+  """Левереджді орнату (Қателерден қорғалған)"""
   try:
     session.set_leverage(
         category=CATEGORY,
@@ -59,10 +54,9 @@ def set_leverage_and_mode(symbol, leverage):
         buyLeverage=str(leverage),
         sellLeverage=str(leverage),
     )
-    logging.info(f"Левередж {leverage}x ретінде орнатылды.")
+    logging.info(f"Левередж {leverage}x ретінде сәтті орнатылды.")
   except Exception as e:
-    # Егер бұрын орнатылған болса, қатені елемейміз
-    logging.debug(f"Левередж ескертуі: {e}")
+    logging.debug(f"Левередж ескертуі (бұрын қойылған болуы мүмкін): {e}")
 
 
 def get_position_info(symbol):
@@ -75,6 +69,8 @@ def get_position_info(symbol):
         size = float(pos["size"])
         if size > 0:
           return pos  # Ашық позиция бар
+    else:
+      logging.error(f"Позиция тексеру API қатесі: {response['retMsg']}")
     return None
   except Exception as e:
     logging.error(f"Позицияны тексеруде қате: {e}")
@@ -109,7 +105,7 @@ def fetch_klines(symbol, interval, limit=250):
       logging.error(f"K-line қатесі: {res['retMsg']}")
       return None
   except Exception as e:
-    logging.error(f"API сурау қатесі: {e}")
+    logging.error(f"API сұрау қатесі: {e}")
     return None
 
 
@@ -154,7 +150,7 @@ def execute_order(symbol, side, qty, price):
     if order["retCode"] == 0:
       logging.info(
           f"✅ [{side.upper()}] Ордер сәтті ашылды! Көлем: {qty} BTC, Баға:"
-          f" ~{price}, SL: {sl_price}, TP: {tp_price}"
+          f" ~${price}, SL: ${sl_price}, TP: ${tp_price}"
       )
     else:
       logging.error(f"Ордер ашу орындалмады: {order['retMsg']}")
@@ -163,19 +159,22 @@ def execute_order(symbol, side, qty, price):
 
 
 # ==============================================================================
-# 4. НЕГІЗГІ ЛООП (MAIN ENGINE)
+# 4. НЕГІЗГІ ДВИЖОК (MAIN LOOP)
 # ==============================================================================
 def main():
   logging.info("==========================================")
-  logging.info("   TRADER DNA SCALP BOT v3.0 ІСКЕ ҚОСЫЛДЫ   ")
-  logging.info(f"   Депозит: ${TOTAL_DEPOSIT} | Тәуекел: {STOP_LOSS_PCT*100}%  ")
+  logging.info("   TRADER DNA SCALP BOT v3.1 (DEMO)     ")
+  logging.info(
+      f"   Депозит: ${TOTAL_DEPOSIT} | Тәуекел: {STOP_LOSS_PCT*2*100}% ($20"
+      " USDT)  "
+  )
   logging.info("==========================================")
 
   set_leverage_and_mode(SYMBOL, LEVERAGE)
 
   while True:
     try:
-      # 1. Алдымен ашық позицияның бар-жоғын тексереміз
+      # 1. Ашық позицияның бар-жоғын тексеру
       active_position = get_position_info(SYMBOL)
       if active_position:
         side = active_position["side"]
@@ -211,8 +210,8 @@ def main():
       prev_stoch_k = df["stoch_k"].iloc[-2]
       prev_stoch_d = df["stoch_d"].iloc[-2]
 
-      # 4. Стратегия шартын тексеру
-      # Тренд: Егер баға EMA 200-ден жоғары болса — ТЕК BUY, төмен болса — ТЕК SELL
+      # 4. Стратегия шарты
+      # Тренд сүзгісі: Егер баға EMA 200-ден жоғары болса — ТЕК BUY, төмен болса — ТЕК SELL
       is_uptrend = last_close > ema200
       is_downtrend = last_close < ema200
 
@@ -228,21 +227,21 @@ def main():
           stoch_k < stoch_d
       )
 
-      # 5. Позиция көлемін есептеу (BTC мөлшері)
-      position_value_usd = POSITION_MARGIN_USD * LEVERAGE  # $100 * 10 = $1000
-      qty = round(position_value_usd / last_close, 3)  # Тоқтаусыз BTC санын есептеу
+      # 5. Позиция көлемін есептеу ($200 * 10x = $2000 USDT номинал)
+      position_value_usd = POSITION_MARGIN_USD * LEVERAGE
+      qty = round(position_value_usd / last_close, 3)
 
       # 6. Сигналдарды өңдеу
       if is_uptrend and ema_buy_cross and stoch_buy_confirm:
         logging.info(
-            f"🟢 BUY Сигналы тіркелді! Баға: {last_close}, EMA200 үстінде."
+            f"🟢 BUY Сигналы тіркелді! Баға: ${last_close}, EMA200 үстінде."
         )
         execute_order(SYMBOL, "Buy", qty, last_close)
-        time.sleep(300)  # Келесі свечаға дейін кідірту (5 мин)
+        time.sleep(300)  # Свеча аяқталғанша кідірту (5 мин)
 
       elif is_downtrend and ema_sell_cross and stoch_sell_confirm:
         logging.info(
-            f"🔴 SELL Сигналы тіркелді! Баға: {last_close}, EMA200 астында."
+            f"🔴 SELL Сигналы тіркелді! Баға: ${last_close}, EMA200 астында."
         )
         execute_order(SYMBOL, "Sell", qty, last_close)
         time.sleep(300)
@@ -254,7 +253,7 @@ def main():
             f" ${round(ema200, 1)}"
         )
 
-      # Әр 30 секунд сайын цикл қайталанады
+      # Әр 30 секунд сайын қайта тексеру
       time.sleep(30)
 
     except KeyboardInterrupt:
