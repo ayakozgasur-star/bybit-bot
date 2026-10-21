@@ -21,32 +21,31 @@ logging.basicConfig(
 # ==============================================================================
 # 2. КОНФИГУРАЦИЯ ЖӘНЕ БАПТАУЛАР (CONFIGURATIONS)
 # ==============================================================================
-# API Кілттер (Орта айнымалыларынан оқылады немесе тырнақша ішіне жазыңыз)
 API_KEY = os.getenv("BYBIT_API_KEY", "СІЗДІҢ_BYBIT_DEMO_API_KEY")
 API_SECRET = os.getenv("BYBIT_API_SECRET", "СІЗДІҢ_BYBIT_DEMO_API_SECRET")
 
-# Баптаулар
 SYMBOL = "BTCUSDT"
-CATEGORY = "linear"  # USDT Futures / Perpetual
-TIMEFRAME = "5"  # 5 минуттық таймфрейм
+CATEGORY = "linear"  # USDT Futures
+TIMEFRAME_ENTRY = "5"  # Кіру таймфреймі: 5 минуттық
+TIMEFRAME_TREND = "60"  # Трендті растау таймфреймі: 1 сағаттық
 
 LEVERAGE = 10  # 10x Плечо
-TOTAL_DEPOSIT = 1000.0  # $1000 USDT
-POSITION_MARGIN_USD = 200.0  # Позицияға бөлінетін сома ($200 USDT -> 2% Тәуекел)
+TOTAL_DEPOSIT = 1000.0  # $1000 USDT Депозит
+POSITION_MARGIN_USD = 200.0  # $200 маржа -> 2% Тәуекел ($20)
 
-# Тәуекел және Пайда пайыздары
-STOP_LOSS_PCT = 0.010  # 1.0% Stop Loss ($20 USDT)
-TAKE_PROFIT_PCT = 0.020  # 2.0% Take Profit ($40 USDT) -> R:R 1:2
+# Тәуекел мен Пайда деңгейлері (R:R 1:2)
+STOP_LOSS_PCT = 0.010  # 1.0% Stop-Loss
+TAKE_PROFIT_PCT = 0.020  # 2.0% Take-Profit
 
 # Bybit Demo Trading HTTP Сессиясы
 session = HTTP(demo=True, api_key=API_KEY, api_secret=API_SECRET)
 
 
 # ==============================================================================
-# 3. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (HELPERS)
+# 3. КӨМЕКШІ ФУНКЦИЯЛАР (HELPERS)
 # ==============================================================================
-def set_leverage_and_mode(symbol, leverage):
-  """Левереджді орнату (Қателерден қорғалған)"""
+def set_leverage(symbol, leverage):
+  """Левереджді орнату"""
   try:
     session.set_leverage(
         category=CATEGORY,
@@ -54,9 +53,9 @@ def set_leverage_and_mode(symbol, leverage):
         buyLeverage=str(leverage),
         sellLeverage=str(leverage),
     )
-    logging.info(f"Левередж {leverage}x ретінде сәтті орнатылды.")
+    logging.info(f"Левередж {leverage}x сәтті орнатылды.")
   except Exception as e:
-    logging.debug(f"Левередж ескертуі (бұрын қойылған болуы мүмкін): {e}")
+    logging.debug(f"Левередж ескертуі: {e}")
 
 
 def get_position_info(symbol):
@@ -64,13 +63,9 @@ def get_position_info(symbol):
   try:
     response = session.get_positions(category=CATEGORY, symbol=symbol)
     if response["retCode"] == 0:
-      positions = response["result"]["list"]
-      for pos in positions:
-        size = float(pos["size"])
-        if size > 0:
-          return pos  # Ашық позиция бар
-    else:
-      logging.error(f"Позиция тексеру API қатесі: {response['retMsg']}")
+      for pos in response["result"]["list"]:
+        if float(pos["size"]) > 0:
+          return pos
     return None
   except Exception as e:
     logging.error(f"Позицияны тексеруде қате: {e}")
@@ -78,7 +73,7 @@ def get_position_info(symbol):
 
 
 def fetch_klines(symbol, interval, limit=250):
-  """Bybit-тен баға деректерін (K-lines) оқу"""
+  """Bybit-тен свеча деректерін алу"""
   try:
     res = session.get_kline(
         category=CATEGORY, symbol=symbol, interval=interval, limit=limit
@@ -99,22 +94,18 @@ def fetch_klines(symbol, interval, limit=250):
       df["close"] = df["close"].astype(float)
       df["high"] = df["high"].astype(float)
       df["low"] = df["low"].astype(float)
-      df = df.iloc[::-1].reset_index(drop=True)  # Реверс
+      df["volume"] = df["volume"].astype(float)
+      df = df.iloc[::-1].reset_index(drop=True)
       return df
-    else:
-      logging.error(f"K-line қатесі: {res['retMsg']}")
-      return None
+    return None
   except Exception as e:
-    logging.error(f"API сұрау қатесі: {e}")
+    logging.error(f"K-line қатесі: {e}")
     return None
 
 
 def calculate_indicators(df):
-  """Индикаторларды есептеу: EMA 7, 17, 50, 200 & Stochastic"""
-  df["ema7"] = df["close"].ewm(span=7, adjust=False).mean()
-  df["ema17"] = df["close"].ewm(span=17, adjust=False).mean()
-  df["ema50"] = df["close"].ewm(span=50, adjust=False).mean()
-  df["ema200"] = df["close"].ewm(span=200, adjust=False).mean()
+  """Индикаторларды есептеу: 20 EMA, Stochastic (8, 5, 3) және Volume MA"""
+  df["ema20"] = df["close"].ewm(span=20, adjust=False).mean()
 
   # Стохастик (8, 5, 3)
   low_min = df["low"].rolling(window=8).min()
@@ -123,13 +114,27 @@ def calculate_indicators(df):
   df["stoch_k"] = stoch_k.rolling(window=5).mean()
   df["stoch_d"] = df["stoch_k"].rolling(window=3).mean()
 
+  # Көлем орташа мәні (Volume Moving Average) импульсті тексеру үшін
+  df["vol_ma"] = df["volume"].rolling(window=20).mean()
+
   return df
+
+
+def get_higher_timeframe_trend(symbol):
+  """1 сағаттық (1H) үлкен таймфрейм арқылы трендті анықтау"""
+  df_1h = fetch_klines(symbol, TIMEFRAME_TREND, limit=50)
+  if df_1h is not None and len(df_1h) >= 20:
+    df_1h["ema50"] = df_1h["close"].ewm(span=50, adjust=False).mean()
+    last_close = df_1h["close"].iloc[-1]
+    ema50_1h = df_1h["ema50"].iloc[-1]
+    # Егер баға 1H EMA50-ден жоғары болса — Bullish, төмен болса — Bearish
+    return "BUY" if last_close > ema50_1h else "SELL"
+  return "NEUTRAL"
 
 
 def execute_order(symbol, side, qty, price):
   """Ордерді Stop-Loss және Take-Profit-пен бірге ашу"""
   try:
-    # Баға қадамдарын дұрыстау (Precision)
     if side == "Buy":
       sl_price = round(price * (1.0 - STOP_LOSS_PCT), 1)
       tp_price = round(price * (1.0 + TAKE_PROFIT_PCT), 1)
@@ -149,99 +154,104 @@ def execute_order(symbol, side, qty, price):
     )
     if order["retCode"] == 0:
       logging.info(
-          f"✅ [{side.upper()}] Ордер сәтті ашылды! Көлем: {qty} BTC, Баға:"
+          f"✅ Сапалы [{side.upper()}] Ордер ашылды! Көлем: {qty} BTC, Баға:"
           f" ~${price}, SL: ${sl_price}, TP: ${tp_price}"
       )
     else:
-      logging.error(f"Ордер ашу орындалмады: {order['retMsg']}")
+      logging.error(f"Ордер қатесі: {order['retMsg']}")
   except Exception as e:
-    logging.error(f"Ордер ашу кезіндегі қателік: {e}")
+    logging.error(f"Ордер жіберудегі қате: {e}")
 
 
 # ==============================================================================
-# 4. НЕГІЗГІ ДВИЖОК (MAIN LOOP)
+# 4. НЕГІЗГІ ЛООП (MAIN LOOP)
 # ==============================================================================
 def main():
-  logging.info("==========================================")
-  logging.info("   TRADER DNA SCALP BOT v3.1 (DEMO)     ")
+  logging.info("==================================================")
+  logging.info("   TRADER DNA SMART SCALP BOT (MULTI-TIMEFRAME)   ")
   logging.info(
-      f"   Депозит: ${TOTAL_DEPOSIT} | Тәуекел: {STOP_LOSS_PCT*2*100}% ($20"
-      " USDT)  "
+      f"   Депозит: ${TOTAL_DEPOSIT} | Тәуекел: 2.0% ($20 USDT)      "
   )
-  logging.info("==========================================")
+  logging.info("==================================================")
 
-  set_leverage_and_mode(SYMBOL, LEVERAGE)
+  set_leverage(SYMBOL, LEVERAGE)
 
   while True:
     try:
-      # 1. Ашық позицияның бар-жоғын тексеру
+      # 1. Ашық позиция бар-жоғын тексеру
       active_position = get_position_info(SYMBOL)
       if active_position:
-        side = active_position["side"]
-        size = active_position["size"]
-        pnl = active_position["unrealisedPnl"]
         logging.info(
-            f"⏳ Ашық позиция бар [{side} - {size} BTC]. PnL: {pnl} USDT."
-            " Күтеміз..."
+            f"⏳ Ашық позиция бар [{active_position['side']}]."
+            f" PnL: {active_position['unrealisedPnl']} USDT. Күтеміз..."
         )
         time.sleep(30)
         continue
 
-      # 2. График деректерін алу
-      df = fetch_klines(SYMBOL, TIMEFRAME)
-      if df is None or len(df) < 200:
-        logging.warning("Деректер жеткіліксіз. 15 секунд күту...")
+      # 2. 5 минуттық кіру деректерін алу
+      df = fetch_klines(SYMBOL, TIMEFRAME_ENTRY, limit=50)
+      if df is None or len(df) < 30:
+        logging.warning("Деректер жеткіліксіз. 15 секунд күтеміз...")
         time.sleep(15)
         continue
 
-      # 3. Индикаторларды есептеу
+      # 3. Индикаторлар
       df = calculate_indicators(df)
 
       last_close = df["close"].iloc[-1]
-      ema7 = df["ema7"].iloc[-1]
-      ema17 = df["ema17"].iloc[-1]
-      ema200 = df["ema200"].iloc[-1]
-
-      prev_ema7 = df["ema7"].iloc[-2]
-      prev_ema17 = df["ema17"].iloc[-2]
+      prev_close = df["close"].iloc[-2]
+      ema20 = df["ema20"].iloc[-1]
 
       stoch_k = df["stoch_k"].iloc[-1]
       stoch_d = df["stoch_d"].iloc[-1]
       prev_stoch_k = df["stoch_k"].iloc[-2]
       prev_stoch_d = df["stoch_d"].iloc[-2]
 
-      # 4. Стратегия шарты
-      # Тренд сүзгісі: Егер баға EMA 200-ден жоғары болса — ТЕК BUY, төмен болса — ТЕК SELL
-      is_uptrend = last_close > ema200
-      is_downtrend = last_close < ema200
+      current_volume = df["volume"].iloc[-1]
+      avg_volume = df["vol_ma"].iloc[-1]
 
-      # EMA7 және EMA17 Қиылысуы
-      ema_buy_cross = (prev_ema7 <= prev_ema17) and (ema7 > ema17)
-      ema_sell_cross = (prev_ema7 >= prev_ema17) and (ema7 < ema17)
+      # 4. Мульти-таймфреймдік трендті алу (1 сағаттық растау)
+      higher_trend = get_higher_timeframe_trend(SYMBOL)
 
-      # Стохастик растауы
-      stoch_buy_confirm = (prev_stoch_k <= prev_stoch_d) and (
-          stoch_k > stoch_d
+      # 5. Сапалы сигнал шарттары (EMA 20 + Stochastic + Volume + 1H Trend)
+      # Көлем орташа мәннен жоғары болуы тиіс (импульсті растау үшін)
+      is_volume_strong = current_volume > avg_volume
+
+      buy_condition = (
+          (higher_trend == "BUY")
+          and (prev_close < ema20)
+          and (last_close > ema20)
+          and (prev_stoch_k <= prev_stoch_d)
+          and (stoch_k > stoch_d)
+          and is_volume_strong
       )
-      stoch_sell_confirm = (prev_stoch_k >= prev_stoch_d) and (
-          stoch_k < stoch_d
+
+      sell_condition = (
+          (higher_trend == "SELL")
+          and (prev_close > ema20)
+          and (last_close < ema20)
+          and (prev_stoch_k >= prev_stoch_d)
+          and (stoch_k < stoch_d)
+          and is_volume_strong
       )
 
-      # 5. Позиция көлемін есептеу ($200 * 10x = $2000 USDT номинал)
+      # 6. Позиция көлемі (BTC)
       position_value_usd = POSITION_MARGIN_USD * LEVERAGE
       qty = round(position_value_usd / last_close, 3)
 
-      # 6. Сигналдарды өңдеу
-      if is_uptrend and ema_buy_cross and stoch_buy_confirm:
+      # 7. Сигналды орындау
+      if buy_condition:
         logging.info(
-            f"🟢 BUY Сигналы тіркелді! Баға: ${last_close}, EMA200 үстінде."
+            f"🟢 ЖОҒАРЫ САПАЛЫ BUY СИГНАЛЫ! 1H Тренд Өсуде, Көлем жоғары."
+            f" Баға: ${last_close}"
         )
         execute_order(SYMBOL, "Buy", qty, last_close)
-        time.sleep(300)  # Свеча аяқталғанша кідірту (5 мин)
+        time.sleep(300)
 
-      elif is_downtrend and ema_sell_cross and stoch_sell_confirm:
+      elif sell_condition:
         logging.info(
-            f"🔴 SELL Сигналы тіркелді! Баға: ${last_close}, EMA200 астында."
+            f"🔴 ЖОҒАРЫ САПАЛЫ SELL СИГНАЛЫ! 1H Тренд Төмендеуде, Көлем жоғары."
+            f" Баға: ${last_close}"
         )
         execute_order(SYMBOL, "Sell", qty, last_close)
         time.sleep(300)
@@ -249,18 +259,17 @@ def main():
       else:
         now_str = datetime.now(timezone.utc).strftime("%H:%M:%S")
         logging.info(
-            f"[{now_str}] Нарық тыныш. Баға: ${last_close} | EMA200:"
-            f" ${round(ema200, 1)}"
+            f"[{now_str}] Нарық сүзгіден өтуде... 1H Тренд: {higher_trend} |"
+            f" Баға: ${last_close}"
         )
 
-      # Әр 30 секунд сайын қайта тексеру
       time.sleep(30)
 
     except KeyboardInterrupt:
-      logging.info("🛑 Бот пайдаланушы тарапынан тоқтатылды.")
+      logging.info("🛑 Бот тоқтатылды.")
       break
     except Exception as e:
-      logging.error(f"Негізгі циклдегі күтпеген қате: {e}")
+      logging.error(f"Қате орын алды: {e}")
       time.sleep(10)
 
 
