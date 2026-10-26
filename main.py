@@ -4,16 +4,14 @@ import os
 from datetime import datetime, timezone
 import time
 
-from dotenv import load_dotenv
 import pandas as pd
 from pybit.unified_trading import HTTP
-
-load_dotenv()
 
 # ================= SETTINGS =================
 SYMBOL = os.getenv("SYMBOL", "BTCUSDT")
 CATEGORY = "linear"
 
+# API кілттері тікелей жүйелік орта айнымалыларынан (Environment Variables) оқылады
 API_KEY = os.getenv("BYBIT_API_KEY", "").strip()
 API_SECRET = os.getenv("BYBIT_API_SECRET", "").strip()
 
@@ -65,8 +63,6 @@ log = logging.getLogger("BybitDemoScalper")
 
 
 def floor_step(value, step):
-  value = Decimal(str(value)) if "Decimal" in globals() else float(value)
-  # Decimal арқылы дөңгелеу
   from decimal import Decimal, ROUND_DOWN
 
   val_dec = Decimal(str(value))
@@ -86,7 +82,8 @@ class DemoScalper:
   def __init__(self):
     if not API_KEY or not API_SECRET:
       raise RuntimeError(
-          "BYBIT_API_KEY және BYBIT_API_SECRET .env файлында болуы керек."
+          "BYBIT_API_KEY және BYBIT_API_SECRET орта айнымалыларында"
+          " (Environment Variables) көрсетілуі тиіс."
       )
 
     self.api = HTTP(
