@@ -11,13 +11,13 @@ from pybit.unified_trading import HTTP
 SYMBOL = os.getenv("SYMBOL", "BTCUSDT")
 CATEGORY = "linear"
 
-# API кілттері тікелей жүйелік орта айнымалыларынан (Environment Variables) оқылады
+# API кілттері тікелей жүйелік орта айнымалыларынан оқылады
 API_KEY = os.getenv("BYBIT_API_KEY", "").strip()
 API_SECRET = os.getenv("BYBIT_API_SECRET", "").strip()
 
-# Алдымен false қалдырыңыз! (Тест үшін)
+# Тікелей сауда жасау режимі қосылды (true)
 TRADING_ENABLED = (
-    os.getenv("BOT_TRADING_ENABLED", "false").lower() == "true"
+    os.getenv("BOT_TRADING_ENABLED", "true").lower() == "true"
 )
 
 MARGIN_USDT = 10.0
