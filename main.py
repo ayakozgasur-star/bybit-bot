@@ -1,277 +1,476 @@
+import csv
 import logging
 import os
-import sys
-import time
 from datetime import datetime, timezone
+import time
+
+from dotenv import load_dotenv
 import pandas as pd
 from pybit.unified_trading import HTTP
 
-# ==============================================================================
-# 1. ЛОГТАУ СИСТЕМАСЫ (LOGGING SETUP)
-# ==============================================================================
+load_dotenv()
+
+# ================= SETTINGS =================
+SYMBOL = os.getenv("SYMBOL", "BTCUSDT")
+CATEGORY = "linear"
+
+API_KEY = os.getenv("BYBIT_API_KEY", "").strip()
+API_SECRET = os.getenv("BYBIT_API_SECRET", "").strip()
+
+# Алдымен false қалдырыңыз! (Тест үшін)
+TRADING_ENABLED = (
+    os.getenv("BOT_TRADING_ENABLED", "false").lower() == "true"
+)
+
+MARGIN_USDT = 10.0
+LEVERAGE = 3
+
+TP_PCT = 0.005  # 0.50%
+SL_PCT = 0.003  # 0.30%
+
+# 0.055% әр бағытқа — тек резервтік мән.
+FALLBACK_TAKER_FEE = 0.00055
+
+# Әр бағыттағы сырғудың болжамы
+SLIPPAGE_PER_SIDE = 0.0002
+
+# 0.08% асқан спредте сауда жасамау
+MAX_SPREAD_PCT = 0.0008
+
+# TP кезіндегі минималды болжамды таза пайда
+MIN_EXPECTED_NET = 0.03
+
+POLL_SECONDS = 5
+CSV_FILE = "trades.csv"
+LOG_FILE = "scalper.log"
+
+# EMA 5/13: 1 минуттық шамдар
+EMA_FAST = 5
+EMA_SLOW = 13
+RSI_PERIOD = 7
+VOLUME_PERIOD = 20
+
+# ============================================
+
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
+    format="%(asctime)s %(levelname)s %(message)s",
     handlers=[
-        logging.FileHandler("bot_execution.log", encoding="utf-8"),
-        logging.StreamHandler(sys.stdout),
+        logging.StreamHandler(),
+        logging.FileHandler(LOG_FILE, encoding="utf-8"),
     ],
 )
 
-# ==============================================================================
-# 2. КОНФИГУРАЦИЯ ЖӘНЕ БАПТАУЛАР (CONFIGURATIONS)
-# ==============================================================================
-API_KEY = os.getenv("BYBIT_API_KEY", "СІЗДІҢ_BYBIT_DEMO_API_KEY")
-API_SECRET = os.getenv("BYBIT_API_SECRET", "СІЗДІҢ_BYBIT_DEMO_API_SECRET")
-
-SYMBOL = "BTCUSDT"
-CATEGORY = "linear"  # USDT Futures
-TIMEFRAME_ENTRY = "5"  # Кіру таймфреймі: 5 минуттық
-TIMEFRAME_TREND = "60"  # Трендті растау таймфреймі: 1 сағаттық
-
-LEVERAGE = 10  # 10x Плечо
-TOTAL_DEPOSIT = 1000.0  # $1000 USDT Депозит
-POSITION_MARGIN_USD = 200.0  # $200 маржа -> 2% Тәуекел ($20)
-
-# Тәуекел мен Пайда деңгейлері (R:R 1:2)
-STOP_LOSS_PCT = 0.010  # 1.0% Stop-Loss
-TAKE_PROFIT_PCT = 0.020  # 2.0% Take-Profit
-
-# Bybit Demo Trading HTTP Сессиясы
-session = HTTP(demo=True, api_key=API_KEY, api_secret=API_SECRET)
+log = logging.getLogger("BybitDemoScalper")
 
 
-# ==============================================================================
-# 3. КӨМЕКШІ ФУНКЦИЯЛАР (HELPERS)
-# ==============================================================================
-def set_leverage(symbol, leverage):
-  """Левереджді орнату"""
-  try:
-    session.set_leverage(
-        category=CATEGORY,
-        symbol=symbol,
-        buyLeverage=str(leverage),
-        sellLeverage=str(leverage),
-    )
-    logging.info(f"Левередж {leverage}x сәтті орнатылды.")
-  except Exception as e:
-    logging.debug(f"Левередж ескертуі: {e}")
+def floor_step(value, step):
+  value = Decimal(str(value)) if "Decimal" in globals() else float(value)
+  # Decimal арқылы дөңгелеу
+  from decimal import Decimal, ROUND_DOWN
+
+  val_dec = Decimal(str(value))
+  step_dec = Decimal(str(step))
+  return format(
+      (val_dec / step_dec).to_integral_value(rounding=ROUND_DOWN) * step_dec,
+      "f",
+  )
 
 
-def get_position_info(symbol):
-  """Ашық позицияның бар-жоғын тексеру"""
-  try:
-    response = session.get_positions(category=CATEGORY, symbol=symbol)
-    if response["retCode"] == 0:
-      for pos in response["result"]["list"]:
-        if float(pos["size"]) > 0:
-          return pos
-    return None
-  except Exception as e:
-    logging.error(f"Позицияны тексеруде қате: {e}")
-    return None
+def utc_now():
+  return datetime.now(timezone.utc).isoformat()
 
 
-def fetch_klines(symbol, interval, limit=250):
-  """Bybit-тен свеча деректерін алу"""
-  try:
-    res = session.get_kline(
-        category=CATEGORY, symbol=symbol, interval=interval, limit=limit
-    )
-    if res["retCode"] == 0:
-      df = pd.DataFrame(
-          res["result"]["list"],
-          columns=[
-              "startTime",
-              "open",
-              "high",
-              "low",
-              "close",
-              "volume",
-              "turnover",
-          ],
+class DemoScalper:
+
+  def __init__(self):
+    if not API_KEY or not API_SECRET:
+      raise RuntimeError(
+          "BYBIT_API_KEY және BYBIT_API_SECRET .env файлында болуы керек."
       )
-      df["close"] = df["close"].astype(float)
-      df["high"] = df["high"].astype(float)
-      df["low"] = df["low"].astype(float)
-      df["volume"] = df["volume"].astype(float)
-      df = df.iloc[::-1].reset_index(drop=True)
-      return df
+
+    self.api = HTTP(
+        testnet=False, demo=True, api_key=API_KEY, api_secret=API_SECRET
+    )
+
+    self.qty_step = "0.001"
+    self.min_qty = 0.001
+    self.tick_size = "0.1"
+
+    self.fee_rate = FALLBACK_TAKER_FEE
+    self.last_candle = None
+    self.seen_closed = set()
+
+    self.total_net = 0.0
+    self.total_fees = 0.0
+    self.wins = 0
+    self.losses = 0
+    self.closed_trades = 0
+
+    self.prepare_csv()
+    self.load_instrument()
+    self.load_fee()
+
+    try:
+      self.api.set_leverage(
+          category=CATEGORY,
+          symbol=SYMBOL,
+          buyLeverage=str(LEVERAGE),
+          sellLeverage=str(LEVERAGE),
+      )
+    except Exception as exc:
+      log.warning("Leverage өзгертілмеді немесе бұрын орнатылған: %s", exc)
+
+  def prepare_csv(self):
+    if not os.path.exists(CSV_FILE):
+      with open(CSV_FILE, "w", newline="", encoding="utf-8") as file:
+        writer = csv.writer(file)
+        writer.writerow([
+            "utc_time",
+            "symbol",
+            "side",
+            "qty",
+            "entry_price",
+            "exit_price",
+            "closed_pnl",
+            "open_fee",
+            "close_fee",
+            "funding_fee",
+        ])
+
+  def load_instrument(self):
+    response = self.api.get_instruments_info(category=CATEGORY, symbol=SYMBOL)
+
+    instruments = response["result"]["list"]
+    if not instruments:
+      raise RuntimeError(f"Bybit инструменті табылмады: {SYMBOL}")
+
+    info = instruments[0]
+    lot = info["lotSizeFilter"]
+    price = info["priceFilter"]
+
+    self.qty_step = lot["qtyStep"]
+    self.min_qty = float(lot["minOrderQty"])
+    self.tick_size = price["tickSize"]
+
+    log.info(
+        "Instrument=%s qty_step=%s min_qty=%s tick=%s",
+        SYMBOL,
+        self.qty_step,
+        self.min_qty,
+        self.tick_size,
+    )
+
+  def load_fee(self):
+    try:
+      response = self.api.get_fee_rates(category=CATEGORY, symbol=SYMBOL)
+      item = response["result"]["list"][0]
+      self.fee_rate = float(item["takerFeeRate"])
+      log.info("API taker fee: %.5f%%", self.fee_rate * 100)
+    except Exception as exc:
+      self.fee_rate = FALLBACK_TAKER_FEE
+      log.warning(
+          "API комиссиясы алынбады; резервтік %.5f%%: %s",
+          self.fee_rate * 100,
+          exc,
+      )
+
+  def get_market(self):
+    response = self.api.get_tickers(category=CATEGORY, symbol=SYMBOL)
+    item = response["result"]["list"][0]
+
+    bid = float(item["bid1Price"])
+    ask = float(item["ask1Price"])
+    last = float(item["lastPrice"])
+
+    if min(bid, ask, last) <= 0:
+      raise RuntimeError("Баға деректері жарамсыз")
+
+    mid = (bid + ask) / 2
+    spread = (ask - bid) / mid
+
+    return {"bid": bid, "ask": ask, "last": last, "spread": spread}
+
+  def get_candles(self):
+    response = self.api.get_kline(
+        category=CATEGORY, symbol=SYMBOL, interval="1", limit=100
+    )
+
+    rows = sorted(response["result"]["list"], key=lambda row: int(row[0]))
+
+    now_ms = int(time.time() * 1000)
+    rows = [row for row in rows if int(row[0]) + 60000 <= now_ms]
+
+    if len(rows) < 30:
+      return None
+
+    df = pd.DataFrame(
+        rows,
+        columns=["start", "open", "high", "low", "close", "volume", "turnover"],
+    )
+
+    for column in ["close", "volume"]:
+      df[column] = df[column].astype(float)
+
+    df["start"] = df["start"].astype("int64")
+
+    df["ema_fast"] = df["close"].ewm(span=EMA_FAST, adjust=False).mean()
+    df["ema_slow"] = df["close"].ewm(span=EMA_SLOW, adjust=False).mean()
+
+    delta = df["close"].diff()
+    gain = delta.clip(lower=0).rolling(RSI_PERIOD).mean()
+    loss = (-delta.clip(upper=0)).rolling(RSI_PERIOD).mean()
+
+    rs = gain / loss.replace(0, 1e-12)
+    df["rsi"] = 100 - 100 / (1 + rs)
+
+    df["volume_avg"] = df["volume"].rolling(VOLUME_PERIOD).mean()
+
+    return df.reset_index(drop=True)
+
+  def get_signal(self, df):
+    previous = df.iloc[-2]
+    current = df.iloc[-1]
+
+    candle_id = int(current["start"])
+    if candle_id == self.last_candle:
+      return None
+
+    self.last_candle = candle_id
+
+    volume_ok = current["volume"] >= current["volume_avg"] * 0.8
+
+    cross_up = (
+        previous["ema_fast"] <= previous["ema_slow"]
+        and current["ema_fast"] > current["ema_slow"]
+    )
+
+    cross_down = (
+        previous["ema_fast"] >= previous["ema_slow"]
+        and current["ema_fast"] < current["ema_slow"]
+    )
+
+    if volume_ok and cross_up and 45 <= current["rsi"] <= 72:
+      return "Buy"
+
+    if volume_ok and cross_down and 28 <= current["rsi"] <= 55:
+      return "Sell"
+
     return None
-  except Exception as e:
-    logging.error(f"K-line қатесі: {e}")
-    return None
 
+  def get_positions(self):
+    response = self.api.get_positions(category=CATEGORY, symbol=SYMBOL)
+    return [
+        p
+        for p in response["result"]["list"]
+        if float(p.get("size", 0) or 0) > 0
+    ]
 
-def calculate_indicators(df):
-  """Индикаторларды есептеу: 20 EMA, Stochastic (8, 5, 3) және Volume MA"""
-  df["ema20"] = df["close"].ewm(span=20, adjust=False).mean()
+  def estimate_costs(self, notional, spread):
+    fees = notional * self.fee_rate * 2
+    spread_cost = notional * spread
+    slippage = notional * SLIPPAGE_PER_SIDE * 2
+    total = fees + spread_cost + slippage
+    return fees, spread_cost, slippage, total
 
-  # Стохастик (8, 5, 3)
-  low_min = df["low"].rolling(window=8).min()
-  high_max = df["high"].rolling(window=8).max()
-  stoch_k = 100 * ((df["close"] - low_min) / (high_max - low_min + 1e-9))
-  df["stoch_k"] = stoch_k.rolling(window=5).mean()
-  df["stoch_d"] = df["stoch_k"].rolling(window=3).mean()
+  def send_entry(self, side, market):
+    spread = market["spread"]
 
-  # Көлем орташа мәні (Volume Moving Average) импульсті тексеру үшін
-  df["vol_ma"] = df["volume"].rolling(window=20).mean()
+    if spread > MAX_SPREAD_PCT:
+      log.info("Сауда өткізіліп жіберілді: спред %.4f%%", spread * 100)
+      return
 
-  return df
+    reference_price = market["ask"] if side == "Buy" else market["bid"]
 
+    notional_target = MARGIN_USDT * LEVERAGE
+    qty = floor_step(notional_target / reference_price, self.qty_step)
 
-def get_higher_timeframe_trend(symbol):
-  """1 сағаттық (1H) үлкен таймфрейм арқылы трендті анықтау"""
-  df_1h = fetch_klines(symbol, TIMEFRAME_TREND, limit=50)
-  if df_1h is not None and len(df_1h) >= 20:
-    df_1h["ema50"] = df_1h["close"].ewm(span=50, adjust=False).mean()
-    last_close = df_1h["close"].iloc[-1]
-    ema50_1h = df_1h["ema50"].iloc[-1]
-    # Егер баға 1H EMA50-ден жоғары болса — Bullish, төмен болса — Bearish
-    return "BUY" if last_close > ema50_1h else "SELL"
-  return "NEUTRAL"
+    if float(qty) < self.min_qty:
+      log.warning("Ордер көлемі минималды мөлшерден аз: %s", qty)
+      return
 
+    notional = float(qty) * reference_price
 
-def execute_order(symbol, side, qty, price):
-  """Ордерді Stop-Loss және Take-Profit-пен бірге ашу"""
-  try:
-    if side == "Buy":
-      sl_price = round(price * (1.0 - STOP_LOSS_PCT), 1)
-      tp_price = round(price * (1.0 + TAKE_PROFIT_PCT), 1)
-    else:
-      sl_price = round(price * (1.0 + STOP_LOSS_PCT), 1)
-      tp_price = round(price * (1.0 - TAKE_PROFIT_PCT), 1)
+    fees, spread_cost, slippage, total_cost = self.estimate_costs(
+        notional, spread
+    )
 
-    order = session.place_order(
+    gross_tp = notional * TP_PCT
+    estimated_net = gross_tp - total_cost
+
+    log.info(
+        "%s | көлем=$%.2f | комиссия≈$%.4f | спред≈$%.4f | сырғу≈$%.4f | TP"
+        " жалпы=$%.4f | TP таза≈$%.4f",
+        side,
+        notional,
+        fees,
+        spread_cost,
+        slippage,
+        gross_tp,
+        estimated_net,
+    )
+
+    if estimated_net < MIN_EXPECTED_NET:
+      log.info(
+          "Сауда жоқ: болжамды таза пайда $%.4f шектен төмен", estimated_net
+      )
+      return
+
+    if not TRADING_ENABLED:
+      log.info("ҚАУІПСІЗ РЕЖИМ: ордер жіберілген жоқ.")
+      return
+
+    if self.get_positions():
+      log.info("Ашық позиция бар, жаңа ордер жіберілмейді.")
+      return
+
+    tp_price = reference_price * (1 + TP_PCT if side == "Buy" else 1 - TP_PCT)
+    sl_price = reference_price * (1 - SL_PCT if side == "Buy" else 1 + SL_PCT)
+
+    tp = floor_step(tp_price, self.tick_size)
+    sl = floor_step(sl_price, self.tick_size)
+
+    response = self.api.place_order(
         category=CATEGORY,
-        symbol=symbol,
+        symbol=SYMBOL,
         side=side,
         orderType="Market",
-        qty=str(qty),
-        stopLoss=str(sl_price),
-        takeProfit=str(tp_price),
+        qty=qty,
+        positionIdx=0,
+        takeProfit=tp,
+        stopLoss=sl,
+        tpTriggerBy="MarkPrice",
+        slTriggerBy="MarkPrice",
         tpslMode="Full",
+        tpOrderType="Market",
+        slOrderType="Market",
     )
-    if order["retCode"] == 0:
-      logging.info(
-          f"✅ Сапалы [{side.upper()}] Ордер ашылды! Көлем: {qty} BTC, Баға:"
-          f" ~${price}, SL: ${sl_price}, TP: ${tp_price}"
-      )
-    else:
-      logging.error(f"Ордер қатесі: {order['retMsg']}")
-  except Exception as e:
-    logging.error(f"Ордер жіберудегі қате: {e}")
 
+    log.info(
+        "DEMO ордері жіберілді: side=%s qty=%s TP=%s SL=%s id=%s",
+        side,
+        qty,
+        tp,
+        sl,
+        response.get("result", {}).get("orderId"),
+    )
 
-# ==============================================================================
-# 4. НЕГІЗГІ ЛООП (MAIN LOOP)
-# ==============================================================================
-def main():
-  logging.info("==================================================")
-  logging.info("   TRADER DNA SMART SCALP BOT (MULTI-TIMEFRAME)   ")
-  logging.info(
-      f"   Депозит: ${TOTAL_DEPOSIT} | Тәуекел: 2.0% ($20 USDT)      "
-  )
-  logging.info("==================================================")
-
-  set_leverage(SYMBOL, LEVERAGE)
-
-  while True:
+  def update_closed_trades(self):
     try:
-      # 1. Ашық позиция бар-жоғын тексеру
-      active_position = get_position_info(SYMBOL)
-      if active_position:
-        logging.info(
-            f"⏳ Ашық позиция бар [{active_position['side']}]."
-            f" PnL: {active_position['unrealisedPnl']} USDT. Күтеміз..."
-        )
-        time.sleep(30)
-        continue
-
-      # 2. 5 минуттық кіру деректерін алу
-      df = fetch_klines(SYMBOL, TIMEFRAME_ENTRY, limit=50)
-      if df is None or len(df) < 30:
-        logging.warning("Деректер жеткіліксіз. 15 секунд күтеміз...")
-        time.sleep(15)
-        continue
-
-      # 3. Индикаторлар
-      df = calculate_indicators(df)
-
-      last_close = df["close"].iloc[-1]
-      prev_close = df["close"].iloc[-2]
-      ema20 = df["ema20"].iloc[-1]
-
-      stoch_k = df["stoch_k"].iloc[-1]
-      stoch_d = df["stoch_d"].iloc[-1]
-      prev_stoch_k = df["stoch_k"].iloc[-2]
-      prev_stoch_d = df["stoch_d"].iloc[-2]
-
-      current_volume = df["volume"].iloc[-1]
-      avg_volume = df["vol_ma"].iloc[-1]
-
-      # 4. Мульти-таймфреймдік трендті алу (1 сағаттық растау)
-      higher_trend = get_higher_timeframe_trend(SYMBOL)
-
-      # 5. Сапалы сигнал шарттары (EMA 20 + Stochastic + Volume + 1H Trend)
-      # Көлем орташа мәннен жоғары болуы тиіс (импульсті растау үшін)
-      is_volume_strong = current_volume > avg_volume
-
-      buy_condition = (
-          (higher_trend == "BUY")
-          and (prev_close < ema20)
-          and (last_close > ema20)
-          and (prev_stoch_k <= prev_stoch_d)
-          and (stoch_k > stoch_d)
-          and is_volume_strong
+      response = self.api.get_closed_pnl(
+          category=CATEGORY, symbol=SYMBOL, limit=100
       )
 
-      sell_condition = (
-          (higher_trend == "SELL")
-          and (prev_close > ema20)
-          and (last_close < ema20)
-          and (prev_stoch_k >= prev_stoch_d)
-          and (stoch_k < stoch_d)
-          and is_volume_strong
-      )
-
-      # 6. Позиция көлемі (BTC)
-      position_value_usd = POSITION_MARGIN_USD * LEVERAGE
-      qty = round(position_value_usd / last_close, 3)
-
-      # 7. Сигналды орындау
-      if buy_condition:
-        logging.info(
-            f"🟢 ЖОҒАРЫ САПАЛЫ BUY СИГНАЛЫ! 1H Тренд Өсуде, Көлем жоғары."
-            f" Баға: ${last_close}"
-        )
-        execute_order(SYMBOL, "Buy", qty, last_close)
-        time.sleep(300)
-
-      elif sell_condition:
-        logging.info(
-            f"🔴 ЖОҒАРЫ САПАЛЫ SELL СИГНАЛЫ! 1H Тренд Төмендеуде, Көлем жоғары."
-            f" Баға: ${last_close}"
-        )
-        execute_order(SYMBOL, "Sell", qty, last_close)
-        time.sleep(300)
-
-      else:
-        now_str = datetime.now(timezone.utc).strftime("%H:%M:%S")
-        logging.info(
-            f"[{now_str}] Нарық сүзгіден өтуде... 1H Тренд: {higher_trend} |"
-            f" Баға: ${last_close}"
+      for item in reversed(response["result"]["list"]):
+        key = (
+            str(item.get("orderId", ""))
+            + ":"
+            + str(item.get("createdTime", ""))
         )
 
-      time.sleep(30)
+        if key in self.seen_closed:
+          continue
 
-    except KeyboardInterrupt:
-      logging.info("🛑 Бот тоқтатылды.")
-      break
-    except Exception as e:
-      logging.error(f"Қате орын алды: {e}")
-      time.sleep(10)
+        self.seen_closed.add(key)
+
+        net = float(item.get("closedPnl", 0) or 0)
+        open_fee = float(item.get("openFee", 0) or 0)
+        close_fee = float(item.get("closeFee", 0) or 0)
+        funding = float(item.get("fundingFee", 0) or 0)
+
+        self.total_net += net
+        self.total_fees += open_fee + close_fee
+
+        self.closed_trades += 1
+        if net > 0:
+          self.wins += 1
+        elif net < 0:
+          self.losses += 1
+
+        with open(CSV_FILE, "a", newline="", encoding="utf-8") as file:
+          csv.writer(file).writerow([
+              utc_now(),
+              SYMBOL,
+              item.get("side", ""),
+              item.get("qty", ""),
+              item.get("avgEntryPrice", ""),
+              item.get("avgExitPrice", ""),
+              net,
+              open_fee,
+              close_fee,
+              funding,
+          ])
+
+        log.info(
+            "ЖАБЫЛДЫ: таза PnL=%.4f USDT, ашу/жабу комиссиясы=%.4f,"
+            " funding=%.4f",
+            net,
+            open_fee + close_fee,
+            funding,
+        )
+
+    except Exception as exc:
+      log.warning("Жабылған мәмілелер тарихы алынбады: %s", exc)
+
+  def show_stats(self):
+    total = self.wins + self.losses
+    winrate = 100 * self.wins / total if total else 0
+
+    log.info(
+        "СТАТИСТИКА | мәміле=%d | win=%d | loss=%d | winrate=%.1f%% |"
+        " комиссия=$%.4f | таза PnL=$%.4f",
+        self.closed_trades,
+        self.wins,
+        self.losses,
+        winrate,
+        self.total_fees,
+        self.total_net,
+    )
+
+  def run(self):
+    log.info(
+        "ІСКЕ ҚОСЫЛДЫ | DEMO | %s | маржа=$%.2f | иық=%sx | TP=%.2f%% |"
+        " SL=%.2f%% | сауда=%s",
+        SYMBOL,
+        MARGIN_USDT,
+        LEVERAGE,
+        TP_PCT * 100,
+        SL_PCT * 100,
+        TRADING_ENABLED,
+    )
+
+    last_stats = 0
+
+    while True:
+      try:
+        self.update_closed_trades()
+
+        market = self.get_market()
+        df = self.get_candles()
+
+        if df is not None:
+          signal = self.get_signal(df)
+
+          if signal:
+            log.info("СИГНАЛ: %s", signal)
+            self.send_entry(signal, market)
+
+        if time.time() - last_stats >= 60:
+          self.show_stats()
+          last_stats = time.time()
+
+        time.sleep(POLL_SECONDS)
+
+      except KeyboardInterrupt:
+        log.info("Бот тоқтатылды.")
+        self.update_closed_trades()
+        self.show_stats()
+        break
+
+      except Exception:
+        log.exception("Қате шықты; бот жалғастырады.")
+        time.sleep(POLL_SECONDS)
 
 
 if __name__ == "__main__":
-  main()
+  DemoScalper().run()
